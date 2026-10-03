@@ -2622,7 +2622,7 @@ def result_from_card_and_visual_audit(
         side_a = str(audit.get("side_right") or "").upper()
 
     if (
-        chosen_count < 6
+        chosen_count < 3
         or min(alignment_a[1], alignment_b[1]) < 1
         or min(alignment_a[3], alignment_b[3]) < 0.72
         or (
@@ -3141,7 +3141,7 @@ def visual_audit_summary(audit: Optional[dict]) -> str:
         lines.append(f"  пояснение модели: {notes[:600]}")
     lines.append(
         "  нужно для регистрации: финальный экран=да, живая игра/TAB=нет, "
-        "уверенность ≥ 0.90, совпало ≥ 6 ников и хотя бы 1 на каждой стороне"
+        "уверенность ≥ 0.90, совпало ≥ 3 ников и хотя бы 1 на каждой стороне"
     )
     return "\n".join(lines)
 
@@ -4809,6 +4809,23 @@ async def send_zero_stat_warnings(
                     user_id,
                 )
                 continue
+
+            # Extra Pro League check: search all mutual guilds for this user
+            # even when resolve_warning_identity returned member=None.
+            if member is None and user_id is not None:
+                for guild in client.guilds:
+                    found_member = guild.get_member(user_id)
+                    if found_member is not None:
+                        if member_has_pro_league_role(found_member):
+                            log.info(
+                                "Варн матча #%s пропущен: у %s роль Pro League (найден через все серверы)",
+                                result.get("match_id"),
+                                user_id,
+                            )
+                            member = found_member
+                            break
+                if member is not None and member_has_pro_league_role(member):
+                    continue
 
             identity_names = player_identity_names(player)
             if user_id is None:
