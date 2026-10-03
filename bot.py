@@ -2622,7 +2622,7 @@ def result_from_card_and_visual_audit(
         side_a = str(audit.get("side_right") or "").upper()
 
     if (
-        chosen_count < 3
+        chosen_count < 6
         or min(alignment_a[1], alignment_b[1]) < 1
         or min(alignment_a[3], alignment_b[3]) < 0.72
         or (
@@ -3141,7 +3141,7 @@ def visual_audit_summary(audit: Optional[dict]) -> str:
         lines.append(f"  пояснение модели: {notes[:600]}")
     lines.append(
         "  нужно для регистрации: финальный экран=да, живая игра/TAB=нет, "
-        "уверенность ≥ 0.90, совпало ≥ 3 ников и хотя бы 1 на каждой стороне"
+        "уверенность ≥ 0.90, совпало ≥ 6 ников и хотя бы 1 на каждой стороне"
     )
     return "\n".join(lines)
 
