@@ -193,14 +193,14 @@ def nickname_similarity(first: object, second: object) -> float:
     ):
         return 0.99
 
+    shorter, longer = sorted((left, right), key=len)
+
     # A scoreboard may append a space+number suffix to a nickname:
     # roster "badgi4" vs scoreboard "badgi4 67" (normalized: "badgi467").
     # If one name starts with the other and the remainder is all digits,
     # treat them as the same player.
     if len(shorter) >= 3 and longer.startswith(shorter) and longer[len(shorter):].isdigit():
         return 0.98
-
-    shorter, longer = sorted((left, right), key=len)
     # Short roster names can have decorative text appended on the scoreboard:
     # `McL` -> `[xtng] McL Bo$$`. Three characters are accepted only as the
     # beginning of the cleaned visible name; longer names may occur anywhere.
