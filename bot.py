@@ -193,6 +193,13 @@ def nickname_similarity(first: object, second: object) -> float:
     ):
         return 0.99
 
+    # A scoreboard may append a space+number suffix to a nickname:
+    # roster "badgi4" vs scoreboard "badgi4 67" (normalized: "badgi467").
+    # If one name starts with the other and the remainder is all digits,
+    # treat them as the same player.
+    if len(shorter) >= 3 and longer.startswith(shorter) and longer[len(shorter):].isdigit():
+        return 0.98
+
     shorter, longer = sorted((left, right), key=len)
     # Short roster names can have decorative text appended on the scoreboard:
     # `McL` -> `[xtng] McL Bo$$`. Three characters are accepted only as the
@@ -4809,23 +4816,6 @@ async def send_zero_stat_warnings(
                     user_id,
                 )
                 continue
-
-            # Extra Pro League check: search all mutual guilds for this user
-            # even when resolve_warning_identity returned member=None.
-            if member is None and user_id is not None:
-                for guild in client.guilds:
-                    found_member = guild.get_member(user_id)
-                    if found_member is not None:
-                        if member_has_pro_league_role(found_member):
-                            log.info(
-                                "Варн матча #%s пропущен: у %s роль Pro League (найден через все серверы)",
-                                result.get("match_id"),
-                                user_id,
-                            )
-                            member = found_member
-                            break
-                if member is not None and member_has_pro_league_role(member):
-                    continue
 
             identity_names = player_identity_names(player)
             if user_id is None:
