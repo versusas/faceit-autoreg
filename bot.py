@@ -108,29 +108,30 @@ _CYRILLIC_TO_LATIN = str.maketrans(
 def normalize_nickname(value: object) -> str:
     """Normalize tags, punctuation and Cyrillic/Latin spelling for matching."""
     text = strip_leading_clan_tags(str(value))
-    # Scoreboards often contain a harmless creator/platform prefix while the
-    # Discord roster contains the same nick with trailing digits.  For
-    # example, `yt: Shamin` must match `Shamin336` instead of being registered
-    # as an absent 0/0/13 player.
+    # Scoreboards often contain a harmless creator/platform prefix
     text = re.sub(
-        r"^\s*(?:yt|youtube|ttv|twitch|vk)\s*(?:[:|._\-–—]+\s*|\s+)",
+        r"^\s*(?:yt|youtube|ttv|twitch|vk|inst|tg|ds|tt)\s*(?:[:|._\-–—]+\s*|\s+)",
         "",
         text,
         flags=re.I,
     )
-    # One player is known on the league as the unique nickname `!`, while the
-    # scoreboard may render it as a short variant like `!m`. Treat `!` and
-    # `!<one letter/digit>` as the same canonical nickname.
+    # Handle the "! nickname" pattern common in mentions
+    text = re.sub(r"^\s*!\s*", "", text)
+    
     if re.fullmatch(r"\s*![A-Za-zА-Яа-яЁё0-9]?\s*", text):
         return "bangnick"
     text = unicodedata.normalize("NFKD", text).casefold()
     text = text.translate(_CYRILLIC_TO_LATIN)
-    return "".join(character for character in text if character.isalnum())
+    normalized = "".join(character for character in text if character.isalnum())
+    return normalized or text.strip().casefold()
 
 
 def strip_leading_clan_tags(value: str) -> str:
     """Drop clan/league prefixes before the real nickname on every code path."""
     text = str(value).strip()
+    # Remove leading symbols that are likely not part of the name
+    text = re.sub(r"^[!?.@#$%\^&*()_+\-=\[\]{}|;':\",./<>?~]+", "", text).strip()
+    
     previous = None
     while previous != text:
         previous = text
@@ -212,7 +213,9 @@ def nickname_similarity(first: object, second: object) -> float:
 
 
 def nicknames_match(first: object, second: object) -> bool:
-    return nickname_similarity(first, second) >= 0.72
+    # Lower threshold slightly to 0.68 to account for complex OCR errors 
+    # while still preventing false positives.
+    return nickname_similarity(first, second) >= 0.68
 
 
 def allow_full_live_tab(audit: dict) -> bool:
@@ -3770,7 +3773,7 @@ RECOVERY_PROMPT = """You received this STANDOFF 2 final result scoreboard before
 Read the attached scoreboard ONE MORE TIME and find the row of every nickname below.
 The table shows one row per player, up to five rows on each side of the scoreboard. Go through BOTH sides row by row, from top to bottom, and check the LAST row of each side explicitly: exactly that row is missed most often. Do not report a row as absent while any row of that side is still unattributed.
 Russian columns У, П, С mean kills, assists, deaths. On the attack side a money column may stand before У/П/С: ignore money, and ignore score/points and ping after deaths. Copy only the digits printed next to the nickname.
-A row may show a clan/league tag before the nickname, such as `[GT] Taule`, `GT | Taule`, `OLD | Taule` or `🔴 GT — Taule`. Such a row belongs to the player whose nickname matches apart from that tag.
+A row may show a clan/league tag before the nickname, such as `[GT] Taule`, `GT | Taule`, `OLD | Taule` or `🔴 GT — Taule`. Such a row belongs to the player whose nickname matches apart from that tag. Ignore leading symbols like '!' in the search.
 The scoreboard nickname may also be longer than the card nickname (`McL` on the card versus `[xtng] McL Bo$$` on the board): accept the row when the card nickname is contained in the visible nickname.
 For every requested player return: card_nickname exactly as listed below; found=true with side CT or T, the visible nickname and its exact kills, assists and deaths; or found=false when no row of the whole table belongs to that nickname.
 Never return a 0/0/13 or 0/0/0 placeholder and never invent, copy or increment numbers: read the pixels of that exact row. If a digit of a found row is unreadable, return found=false and explain in notes.
