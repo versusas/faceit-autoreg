@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v67-guild-owner-admin-access-2026-10-08"
+BOT_VERSION = "v68-telegram-control-bot-2026-10-09"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
@@ -275,6 +275,7 @@ REGISTRATION_CONFIRM_TIMEOUT = float(
 PLAYER_MODAL_TIMEOUT = float(os.getenv("PLAYER_MODAL_TIMEOUT", "12.0"))
 STATS_FILE = os.getenv("STATS_FILE", "/data/registration_stats.json")
 STATS_TIMEZONE = ZoneInfo(os.getenv("STATS_TIMEZONE", "Europe/Moscow"))
+TG_COMMANDS_FILE = os.getenv("TG_COMMANDS_FILE", "/data/tg_commands.json")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -294,6 +295,7 @@ command_permissions_lock = asyncio.Lock()
 player_modal_lock = asyncio.Lock()
 processing_match_lock = asyncio.Lock()
 processing_match_ids: set[int] = set()
+tg_commands_lock = asyncio.Lock()
 
 
 def load_registration_records() -> list[dict]:
@@ -423,6 +425,80 @@ async def revoke_start_end_access(user_id: int) -> bool:
             {"start_end_user_ids": sorted(granted)}
         )
         return True
+
+
+def load_tg_commands_data() -> dict:
+    """Read pending Telegram commands queue."""
+    try:
+        with open(TG_COMMANDS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {"pending": []}
+    except FileNotFoundError:
+        return {"pending": []}
+    except Exception:
+        log.exception("Ошибка чтения файла ТГ-команд %s", TG_COMMANDS_FILE)
+        return {"pending": []}
+
+
+def save_tg_commands_data(data: dict) -> None:
+    directory = os.path.dirname(TG_COMMANDS_FILE)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp = f"{TG_COMMANDS_FILE}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, TG_COMMANDS_FILE)
+
+
+async def process_tg_commands() -> None:
+    """Periodically poll the TG commands file and execute pending commands."""
+    global is_active
+    async with tg_commands_lock:
+        data = load_tg_commands_data()
+        pending: list[dict] = data.get("pending", [])
+        if not pending:
+            return
+        remaining: list[dict] = []
+        for item in pending:
+            cmd = str(item.get("cmd", "")).strip().lower()
+            log.info("ТГ-команда получена: %r", cmd)
+            try:
+                if cmd == "енд":
+                    is_active = False
+                    active_channel_ids.clear()
+                    log.info("ТГ: авторег остановлен")
+                elif cmd.startswith("старт"):
+                    mode_part = cmd.removeprefix("старт").strip()
+                    modes = {
+                        "обычный": NORMAL_CHANNEL_IDS,
+                        "приоритет": PRIORITY_CHANNEL_IDS,
+                        "все": NORMAL_CHANNEL_IDS | PRIORITY_CHANNEL_IDS,
+                        "": NORMAL_CHANNEL_IDS | PRIORITY_CHANNEL_IDS,
+                    }
+                    selected = modes.get(mode_part, NORMAL_CHANNEL_IDS | PRIORITY_CHANNEL_IDS)
+                    if selected:
+                        active_channel_ids.clear()
+                        active_channel_ids.update(selected)
+                        is_active = True
+                        log.info("ТГ: авторег запущен, каналы: %s", selected)
+                    else:
+                        log.warning("ТГ: нет каналов для режима %r", mode_part)
+                else:
+                    log.warning("ТГ: неизвестная команда %r, пропускаю", cmd)
+            except Exception:
+                log.exception("ТГ: ошибка выполнения команды %r", cmd)
+        data["pending"] = remaining
+        save_tg_commands_data(data)
+
+
+async def tg_command_polling_task() -> None:
+    """Background task: checks TG commands file every 3 seconds."""
+    while True:
+        try:
+            await process_tg_commands()
+        except Exception:
+            log.exception("tg_command_polling_task: необработанная ошибка")
+        await asyncio.sleep(3)
 
 
 async def registration_exists(match_id: int) -> bool:
@@ -6570,6 +6646,9 @@ async def on_ready() -> None:
             GEMINI_RESERVE_KEYS_LIMIT,
             GEMINI_RESERVE_KEYS_IGNORED,
         )
+    # Запускаем фоновый опрос команд от Telegram-бота
+    asyncio.get_event_loop().create_task(tg_command_polling_task())
+    log.info("Фоновый опрос ТГ-команд запущен (каждые 3 с, файл: %s)", TG_COMMANDS_FILE)
 
 
 @client.event
