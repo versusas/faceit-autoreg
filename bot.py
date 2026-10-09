@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v68-telegram-control-bot-2026-10-09"
+BOT_VERSION = "v69-telegram-html-fix-2026-10-09"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]

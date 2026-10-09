@@ -230,7 +230,7 @@ async def send_message(
     session: aiohttp.ClientSession,
     chat_id: int,
     text: str,
-    parse_mode: str = "Markdown",
+    parse_mode: str = "HTML",
 ) -> None:
     await tg_request(session, "sendMessage", chat_id=chat_id, text=text, parse_mode=parse_mode)
 
@@ -239,21 +239,21 @@ async def send_message(
 # Обработчики команд
 # --------------------------------------------------------------------------- #
 
-HELP_TEXT = """🤖 *Управление Discord-авторегом*
+HELP_TEXT = """<b>🤖 Управление Discord-авторегом</b>
 
-*Авторег*
+<b>Авторег</b>
 /старт — запустить авторег (все каналы)
 /стоп — остановить авторег
 
-*Статистика*
+<b>Статистика</b>
 /стата — статистика регистраций
 
-*Права в Discord*
-/выдать `Discord_ID` — выдать права на старт/стоп Discord-пользователю
-/убрать `Discord_ID` — забрать права
+<b>Права в Discord</b>
+/выдать <code>Discord_ID</code> — дать права Discord-пользователю
+/убрать <code>Discord_ID</code> — забрать права
 /права — список пользователей с выданными правами
 
-*Прочее*
+<b>Прочее</b>
 /статус — текущее состояние
 /команды — это сообщение"""
 
@@ -307,11 +307,11 @@ async def handle_update(session: aiohttp.ClientSession, update: dict) -> None:
         granted = list_discord_access()
         pending = load_tg_commands().get("pending", [])
         text_out = (
-            f"📡 *Состояние бота*\n"
-            f"Пользователей с Discord-правами: *{len(granted)}*\n"
-            f"Ожидающих команд в очереди: *{len(pending)}*\n"
-            f"Файл статистики: `{STATS_FILE}`\n"
-            f"Файл прав: `{COMMAND_PERMISSIONS_FILE}`"
+            f"<b>📡 Состояние бота</b>\n"
+            f"Пользователей с Discord-правами: <b>{len(granted)}</b>\n"
+            f"Ожидающих команд в очереди: <b>{len(pending)}</b>\n"
+            f"Файл статистики: <code>{STATS_FILE}</code>\n"
+            f"Файл прав: <code>{COMMAND_PERMISSIONS_FILE}</code>"
         )
         await send_message(session, chat_id, text_out)
 
