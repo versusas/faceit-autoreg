@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v65-recover-zeroed-rows-2026-09-15"
+BOT_VERSION = "v66-command-permissions-and-paintalk-match-2026-10-08"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
@@ -254,6 +254,10 @@ WARNING_ELIGIBLE_ROLE_FRAGMENTS = {
     "дивизион",
 }
 MY_ACCOUNT_ID = int(os.getenv("MY_ACCOUNT_ID", "0"))
+COMMAND_PERMISSIONS_FILE = os.getenv(
+    "COMMAND_PERMISSIONS_FILE",
+    "/data/command_permissions.json",
+)
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.82"))
 BACKFILL_LIMIT = int(os.getenv("BACKFILL_LIMIT", "500"))
 SEND_DELAY = float(os.getenv("SEND_DELAY", "0.25"))
@@ -286,6 +290,7 @@ processed_message_ids: set[int] = set()
 gemini_assignment_index = 0
 processing_semaphore = asyncio.Semaphore(PROCESS_CONCURRENCY)
 stats_lock = asyncio.Lock()
+command_permissions_lock = asyncio.Lock()
 player_modal_lock = asyncio.Lock()
 processing_match_lock = asyncio.Lock()
 processing_match_ids: set[int] = set()
@@ -301,6 +306,116 @@ def load_registration_records() -> list[dict]:
     except Exception:
         log.exception("Не удалось прочитать файл статистики %s", STATS_FILE)
         return []
+
+
+def _normalize_user_id_set(values: object) -> set[int]:
+    result: set[int] = set()
+    if not isinstance(values, (list, tuple, set)):
+        return result
+    for value in values:
+        with contextlib.suppress(TypeError, ValueError):
+            user_id = int(value)
+            if user_id > 0:
+                result.add(user_id)
+    return result
+
+
+def load_command_permissions() -> dict[str, list[int]]:
+    default = {"start_end_user_ids": []}
+    try:
+        with open(COMMAND_PERMISSIONS_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except FileNotFoundError:
+        return default
+    except Exception:
+        log.exception(
+            "Не удалось прочитать файл прав команд %s",
+            COMMAND_PERMISSIONS_FILE,
+        )
+        return default
+    if not isinstance(data, dict):
+        return default
+    return {
+        "start_end_user_ids": sorted(
+            _normalize_user_id_set(data.get("start_end_user_ids"))
+        )
+    }
+
+
+async def save_command_permissions(data: dict[str, list[int]]) -> None:
+    directory = os.path.dirname(COMMAND_PERMISSIONS_FILE)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    temporary_file = f"{COMMAND_PERMISSIONS_FILE}.tmp"
+    with open(temporary_file, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+    os.replace(temporary_file, COMMAND_PERMISSIONS_FILE)
+
+
+def permission_owner_ids() -> set[int]:
+    owners: set[int] = set()
+    if MY_ACCOUNT_ID > 0:
+        owners.add(MY_ACCOUNT_ID)
+    session_user_id = int(getattr(getattr(client, "user", None), "id", 0) or 0)
+    if session_user_id > 0:
+        owners.add(session_user_id)
+    return owners
+
+
+def has_start_end_access(user_id: int) -> bool:
+    if user_id <= 0:
+        return False
+    if user_id in permission_owner_ids():
+        return True
+    permissions = load_command_permissions()
+    return user_id in _normalize_user_id_set(permissions.get("start_end_user_ids"))
+
+
+def can_manage_permissions(user_id: int) -> bool:
+    return user_id > 0 and user_id in permission_owner_ids()
+
+
+def extract_permission_target_user_id(
+    message: discord.Message,
+    command_text: str,
+) -> Optional[int]:
+    mentions = list(getattr(message, "mentions", None) or [])
+    if mentions:
+        target_id = int(getattr(mentions[0], "id", 0) or 0)
+        return target_id or None
+    mention_match = re.search(r"<@!?(\d+)>", command_text)
+    if mention_match:
+        return int(mention_match.group(1))
+    numeric_match = re.search(r"(?:выдать|убрать)\s+права\s+(\d{5,22})", command_text, re.I)
+    if numeric_match:
+        return int(numeric_match.group(1))
+    return None
+
+
+async def grant_start_end_access(user_id: int) -> bool:
+    async with command_permissions_lock:
+        permissions = load_command_permissions()
+        granted = _normalize_user_id_set(permissions.get("start_end_user_ids"))
+        if user_id in granted:
+            return False
+        granted.add(user_id)
+        await save_command_permissions(
+            {"start_end_user_ids": sorted(granted)}
+        )
+        return True
+
+
+async def revoke_start_end_access(user_id: int) -> bool:
+    async with command_permissions_lock:
+        permissions = load_command_permissions()
+        granted = _normalize_user_id_set(permissions.get("start_end_user_ids"))
+        if user_id not in granted:
+            return False
+        granted.remove(user_id)
+        await save_command_permissions(
+            {"start_end_user_ids": sorted(granted)}
+        )
+        return True
 
 
 async def registration_exists(match_id: int) -> bool:
@@ -704,7 +819,7 @@ def build_status_html(status: dict[str, object]) -> str:
       <dt>Ник в Discord</dt><dd>{esc(status['configured_name'])}</dd>
       <dt>MY_ACCOUNT_ID</dt><dd><code>{esc(status['configured_id'])}</code></dd>
       <dt>Текущая сессия</dt><dd>{esc(status['session_user'])}</dd>
-      <dt>Команды</dt><dd>Доступны всем пользователям</dd>
+      <dt>Команды</dt><dd>{esc(status['command_access'])}</dd>
     </dl></article>
     <article class="card"><h2>Регистрации</h2><dl>
       <dt>Всего</dt><dd>{esc(status['registrations_total'])}</dd>
@@ -6359,26 +6474,37 @@ async def backfill_channels(channel_ids: set[int], before_time) -> int:
 
 COMMANDS_HELP_TEXT = """📋 **Команды автореги**
 
-**Авторег**
+**Доступно всем**
+`стата` — статистика и график по дням за 14 дней; реакции 📅 / 🕐 переключают дни и часы
+`стата часы` — график по часам за 24 часа
+`команды` — этот список
+
+**Старт / енд — только с выданными правами**
 `старт все` — регистрировать игры из обычного и приоритетного каналов: сначала старые карточки, потом новые
 `старт обычный` — только обычный канал
 `старт приоритет` — только приоритетный канал
 `енд` — остановить авторег
 После перезапуска бота на Railway снова напишите `старт все`.
 
-**Статистика и проверка**
-`стата` — статистика и график по дням за 14 дней; реакции 📅 / 🕐 переключают дни и часы
-`стата часы` — график по часам за 24 часа
+**Только владелец (`MY_ACCOUNT_ID` или текущая сессия)**
+`выдать права @тег` — дать пользователю доступ к `старт` и `енд`
+`убрать права @тег` — забрать доступ к `старт` и `енд`
 `бот ты тут?` — проверить, что бот работает, с HTML-отчётом о настройках
-
-**Обслуживание**
 `забыть 2548` — удалить матч из памяти бота, чтобы зарегистрировать его заново
 `удалить рег соо` — удалить все сообщения «Готово — Матч #… закрыт» в каналах регистрации
 `апи состояние` / `состояние апи` — проверить состояние и остаток на каждом API-ключе
-`команды` — этот список
 
 **Проверка карточки без регистрации**
 Перешлите карточку матча в любой канал вне регистрации — бот ответит готовой командой `=g`, ничего не отправляя в лигу."""
+
+START_END_ACCESS_DENIED_TEXT = (
+    "❌ У вас нет прав на `старт` / `енд`. Всем доступна только `стата`. "
+    "Владелец может выдать доступ командой `выдать права @тег`."
+)
+OWNER_ACCESS_DENIED_TEXT = (
+    "❌ Эта команда доступна только владельцу: пользователю из `MY_ACCOUNT_ID` "
+    "или текущей Discord-сессии бота."
+)
 
 
 @client.event
@@ -6479,13 +6605,70 @@ async def on_message(message: discord.Message) -> None:
     global is_active
 
     run_in_background(delete_confirmation_when_registered(message))
-    command = message.content.strip().lower()
+    raw_command = message.content.strip()
+    command = raw_command.lower()
+    author_id = int(getattr(getattr(message, "author", None), "id", 0) or 0)
 
     if command == "команды":
         await message.channel.send(COMMANDS_HELP_TEXT)
         return
 
+    if re.fullmatch(r"выдать\s+права(?:\s+.+)?", raw_command, re.I):
+        if not can_manage_permissions(author_id):
+            await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
+            return
+        target_id = extract_permission_target_user_id(message, raw_command)
+        if target_id is None:
+            await message.channel.send(
+                "Формат команды: `выдать права @тег`"
+            )
+            return
+        if target_id in permission_owner_ids():
+            await message.channel.send(
+                f"ℹ️ <@{target_id}> и так является владельцем и уже имеет полный доступ."
+            )
+            return
+        granted = await grant_start_end_access(target_id)
+        if granted:
+            await message.channel.send(
+                f"✅ Пользователю <@{target_id}> выданы права на `старт` и `енд`."
+            )
+        else:
+            await message.channel.send(
+                f"ℹ️ У пользователя <@{target_id}> уже есть права на `старт` и `енд`."
+            )
+        return
+
+    if re.fullmatch(r"убрать\s+права(?:\s+.+)?", raw_command, re.I):
+        if not can_manage_permissions(author_id):
+            await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
+            return
+        target_id = extract_permission_target_user_id(message, raw_command)
+        if target_id is None:
+            await message.channel.send(
+                "Формат команды: `убрать права @тег`"
+            )
+            return
+        if target_id in permission_owner_ids():
+            await message.channel.send(
+                f"ℹ️ У владельца <@{target_id}> нельзя забрать встроенный доступ."
+            )
+            return
+        revoked = await revoke_start_end_access(target_id)
+        if revoked:
+            await message.channel.send(
+                f"✅ У пользователя <@{target_id}> забраны права на `старт` и `енд`."
+            )
+        else:
+            await message.channel.send(
+                f"ℹ️ У пользователя <@{target_id}> не было выданных прав на `старт` и `енд`."
+            )
+        return
+
     if re.fullmatch(r"бот\s*,?\s*ты\s+тут\s*\?*", command, re.I):
+        if not can_manage_permissions(author_id):
+            await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
+            return
         configured_user = None
         if MY_ACCOUNT_ID:
             guild = getattr(message, "guild", None)
@@ -6522,6 +6705,9 @@ async def on_message(message: discord.Message) -> None:
             )
 
         counts = registration_status_counts()
+        granted_start_end = _normalize_user_id_set(
+            load_command_permissions().get("start_end_user_ids")
+        )
         now = datetime.now(timezone.utc)
         uptime = format_uptime(int((now - BOT_STARTED_AT).total_seconds()))
         latency_value = getattr(client, "latency", None)
@@ -6560,6 +6746,10 @@ async def on_message(message: discord.Message) -> None:
             "channels": channel_names,
             "generated_at": generated_at,
             "timezone": str(STATS_TIMEZONE),
+            "command_access": (
+                "всем — только `стата`; `старт`/`енд` у владельца и "
+                f"ещё у {len(granted_start_end)} пользователей"
+            ),
         }
         report_bytes = build_status_html(status).encode("utf-8")
         report_file = discord.File(
@@ -6577,7 +6767,8 @@ async def on_message(message: discord.Message) -> None:
             f"Моделей: **{len(GEMINI_MODELS)}** · API-ключи: {ai_keys_summary()}\n"
             f"Автоварны: **{'включены' if WARN_CHANNEL_ID else 'не настроены'}** · "
             f"Pro League ID: **{len(PRO_LEAGUE_USER_IDS)}**\n"
-            "Команды доступны **всем пользователям**. Подробный HTML-отчёт прикреплён.",
+            f"Права на `старт`/`енд`: у владельца и ещё у **{len(granted_start_end)}** пользователей.\n"
+            "Всем доступна только `стата`. Подробный HTML-отчёт прикреплён.", 
             file=report_file,
         )
         return
@@ -6587,6 +6778,9 @@ async def on_message(message: discord.Message) -> None:
         command,
         re.I,
     ):
+        if not can_manage_permissions(author_id):
+            await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
+            return
         registration_channel_ids = NORMAL_CHANNEL_IDS | PRIORITY_CHANNEL_IDS
         if not registration_channel_ids:
             await message.channel.send(
@@ -6618,6 +6812,9 @@ async def on_message(message: discord.Message) -> None:
 
     forget_match = re.fullmatch(r"забыть\s+#?(\d+)", command, re.I)
     if forget_match:
+        if not can_manage_permissions(author_id):
+            await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
+            return
         match_id = int(forget_match.group(1))
         async with processing_match_lock:
             if match_id in processing_match_ids:
@@ -6649,10 +6846,16 @@ async def on_message(message: discord.Message) -> None:
         return
 
     if command.startswith("забыть"):
+        if not can_manage_permissions(author_id):
+            await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
+            return
         await message.channel.send("Формат команды: `забыть 2548`")
         return
 
     if re.fullmatch(r"апи\s+состояние|состояние\s+апи|api\s+status|апи\s+статус|статус\s+апи", command, re.I):
+        if not can_manage_permissions(author_id):
+            await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
+            return
         await message.channel.send("⏳ Проверяю состояние API-ключей...")
         try:
             results = await check_ai_key_status()
@@ -6675,6 +6878,9 @@ async def on_message(message: discord.Message) -> None:
         return
 
     if command == "енд" or command.startswith("старт"):
+        if not has_start_end_access(author_id):
+            await message.channel.send(START_END_ACCESS_DENIED_TEXT)
+            return
         if command == "енд":
             is_active = False
             active_channel_ids.clear()
