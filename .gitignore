@@ -7,3 +7,20 @@ venv/
 ENV/
 registration_stats.json
 data/
+
+# Node / Next leftovers
+node_modules/
+.next/
+package-lock.json
+package.json
+next-env.d.ts
+next.config.ts
+postcss.config.mjs
+tailwind.config.ts
+tsconfig.json
+tsconfig.tsbuildinfo
+src/
+
+# Local temp files
+*.log
+.DS_Store
