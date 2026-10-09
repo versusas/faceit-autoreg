@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v70-model-unavailable-fallback-2026-10-10"
+BOT_VERSION = "v71-openai-model-autodiscovery-2026-10-10"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
@@ -91,6 +91,41 @@ _EMERGENCY_FALLBACK_MODELS = [
     "gemini-2.0-flash-lite",
     "gemini-1.5-flash",
 ]
+OPENAI_MODEL_CACHE_TTL_SECONDS = max(
+    60,
+    int(os.getenv("OPENAI_MODEL_CACHE_TTL_SECONDS", "900")),
+)
+_OPENAI_MULTIMODAL_MODEL_HINTS = (
+    "gpt-4o",
+    "gpt-4.1",
+    "claude",
+    "gemini",
+    "vision",
+    "vl",
+    "llava",
+    "pixtral",
+    "minicpm",
+    "internvl",
+    "glm-4v",
+    "qwen2.5-vl",
+    "qvq",
+    "grok",
+    "kimi",
+)
+_OPENAI_NON_CHAT_MODEL_HINTS = (
+    "embedding",
+    "rerank",
+    "moderation",
+    "whisper",
+    "tts",
+    "speech",
+    "transcribe",
+    "realtime",
+    "dall",
+    "sdxl",
+    "flux",
+    "midjourney",
+)
 PROCESS_CONCURRENCY = max(1, int(os.getenv("PROCESS_CONCURRENCY", "2")))
 
 def parse_channel_ids(variable_name: str) -> set[int]:
@@ -305,6 +340,8 @@ player_modal_lock = asyncio.Lock()
 processing_match_lock = asyncio.Lock()
 processing_match_ids: set[int] = set()
 tg_commands_lock = asyncio.Lock()
+openai_models_cache: dict[str, tuple[float, list[str]]] = {}
+openai_models_cache_lock = asyncio.Lock()
 
 
 def load_registration_records() -> list[dict]:
@@ -982,6 +1019,199 @@ def ai_key_order(assigned_main_index: int) -> list[dict]:
     )
 
 
+def openai_base_v1_url() -> str:
+    base_v1 = GEMINI_BASE_URL.rstrip("/")
+    if not base_v1.endswith("/v1"):
+        base_v1 += "/v1"
+    return base_v1
+
+
+def normalize_model_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def model_aliases(model: str) -> list[str]:
+    aliases: list[str] = []
+    current = model.strip()
+    while current:
+        aliases.append(current)
+        next_value = re.sub(r"[-_]?20\d{6,}$", "", current, flags=re.I)
+        next_value = re.sub(r"[-_](?:latest|preview)$", "", next_value, flags=re.I)
+        next_value = next_value.strip("-_")
+        if next_value == current:
+            break
+        current = next_value
+    return list(dict.fromkeys(alias for alias in aliases if alias))
+
+
+def is_probably_non_chat_model(model: str) -> bool:
+    lowered = model.casefold()
+    return any(hint in lowered for hint in _OPENAI_NON_CHAT_MODEL_HINTS)
+
+
+def is_probably_multimodal_model(model: str) -> bool:
+    lowered = model.casefold()
+    return any(hint in lowered for hint in _OPENAI_MULTIMODAL_MODEL_HINTS)
+
+
+async def fetch_openai_models(
+    session: aiohttp.ClientSession,
+    api_key: str,
+    *,
+    force_refresh: bool = False,
+) -> list[str]:
+    if AI_API_STYLE != "openai":
+        return []
+
+    now = time.monotonic()
+    async with openai_models_cache_lock:
+        cached = openai_models_cache.get(api_key)
+        if cached and cached[0] > now and not force_refresh:
+            return list(cached[1])
+
+    models: list[str] = []
+    body = ""
+    status = 0
+    try:
+        async with session.get(
+            openai_base_v1_url() + "/models",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+        ) as response:
+            status = response.status
+            body = await response.text()
+        if status < 400:
+            payload = json.loads(body)
+            if isinstance(payload, dict):
+                entries = payload.get("data")
+                if not isinstance(entries, list):
+                    entries = payload.get("models")
+            elif isinstance(payload, list):
+                entries = payload
+            else:
+                entries = []
+            if isinstance(entries, list):
+                for entry in entries:
+                    if isinstance(entry, str):
+                        model_id = entry.strip()
+                    elif isinstance(entry, dict):
+                        model_id = str(
+                            entry.get("id")
+                            or entry.get("model")
+                            or entry.get("name")
+                            or ""
+                        ).strip()
+                    else:
+                        model_id = ""
+                    if model_id:
+                        models.append(model_id)
+                models = list(dict.fromkeys(models))
+    except Exception as exc:
+        log.warning("Не удалось получить /v1/models: %s", str(exc)[:200])
+
+    async with openai_models_cache_lock:
+        openai_models_cache[api_key] = (
+            now + OPENAI_MODEL_CACHE_TTL_SECONDS,
+            list(dict.fromkeys(models)),
+        )
+
+    if status >= 400 and status not in (401, 402, 403, 404):
+        log.warning(
+            "OpenAI-провайдер вернул HTTP %s на /v1/models: %s",
+            status,
+            body[:200],
+        )
+    return models
+
+
+def rank_openai_models(
+    requested_models: list[str],
+    available_models: list[str],
+) -> list[str]:
+    available = list(
+        dict.fromkeys(model.strip() for model in available_models if model.strip())
+    )
+    if not available:
+        return []
+
+    requested = [model.strip() for model in requested_models if model.strip()]
+
+    def score(model: str) -> int:
+        lowered = model.casefold()
+        normalized = normalize_model_token(model)
+        value = 0
+        if is_probably_non_chat_model(model):
+            value -= 10000
+        if is_probably_multimodal_model(model):
+            value += 1400
+        if any(tag in lowered for tag in ("mini", "flash", "haiku")):
+            value += 60
+        if any(tag in lowered for tag in ("sonnet", "pro", "4o", "4.1")):
+            value += 40
+        for index, requested_model in enumerate(requested):
+            base = 5000 - index * 200
+            for alias in model_aliases(requested_model):
+                alias_normalized = normalize_model_token(alias)
+                if not alias_normalized:
+                    continue
+                if normalized == alias_normalized:
+                    value = max(value, base)
+                    break
+                if normalized.startswith(alias_normalized) or alias_normalized.startswith(normalized):
+                    value = max(value, base - 100)
+                    break
+                if len(alias_normalized) >= 8 and alias_normalized in normalized:
+                    value = max(value, base - 200)
+                    break
+        return value
+
+    ranked = sorted(
+        available,
+        key=lambda model: (score(model), len(model)),
+        reverse=True,
+    )
+    filtered = [model for model in ranked if score(model) > -5000]
+    return filtered or ranked
+
+
+async def resolve_openai_request_models(
+    session: aiohttp.ClientSession,
+    key_slots: list[dict],
+    requested_models: list[str],
+) -> list[str]:
+    """Resolve configured model names to models the proxy actually exposes."""
+    if AI_API_STYLE != "openai":
+        return list(dict.fromkeys(requested_models))
+
+    available: list[str] = []
+    source_label = ""
+    for slot in key_slots:
+        available = await fetch_openai_models(session, slot["key"])
+        if available:
+            source_label = slot["label"]
+            break
+
+    if not available:
+        return list(dict.fromkeys(requested_models))
+
+    ranked = rank_openai_models(requested_models, available)
+    if not ranked:
+        return list(dict.fromkeys(requested_models))
+
+    requested_set = {normalize_model_token(model) for model in requested_models if model.strip()}
+    if requested_set and normalize_model_token(ranked[0]) not in requested_set:
+        log.warning(
+            "Провайдер OpenAI не знает настроенные модели (%s). "
+            "Автоматически использую %s из /v1/models (%s).",
+            ", ".join(requested_models),
+            ranked[0],
+            source_label or "каталог провайдера",
+        )
+    return ranked
+
+
 def is_ai_key_exhausted(status: int, body: str) -> bool:
     """A spent limit or balance, or a rejected key — not a short overload."""
     if status == 402:
@@ -1000,10 +1230,16 @@ def is_ai_key_exhausted(status: int, body: str) -> bool:
 
 
 def is_model_unavailable(status: int, body: str) -> bool:
-    """The model itself is down — retrying with another key won't help."""
+    """The model itself is down or unknown — another key will not fix it."""
     if status == 503 and "model_temporarily_unavailable" in body:
         return True
     if status == 404 and re.search(r"is not found|models/", body, re.I):
+        return True
+    if status == 400 and re.search(
+        r"model_not_found|unknown model|listed by GET /v1/models|\"param\"\s*:\s*\"model\"",
+        body,
+        re.I,
+    ):
         return True
     return False
 
@@ -1121,8 +1357,14 @@ async def check_ai_key_status() -> list[dict]:
             if not balance_found and info["status"] not in ("invalid_key", "forbidden"):
                 try:
                     test_url = base_v1 + "/chat/completions"
+                    probe_model = GEMINI_MODELS[0] if GEMINI_MODELS else "test"
+                    if AI_API_STYLE == "openai":
+                        available_models = await fetch_openai_models(session, key)
+                        ranked_models = rank_openai_models(GEMINI_MODELS, available_models)
+                        if ranked_models:
+                            probe_model = ranked_models[0]
                     test_payload = {
-                        "model": GEMINI_MODELS[0] if GEMINI_MODELS else "test",
+                        "model": probe_model,
                         "messages": [{"role": "user", "content": "hi"}],
                         "max_tokens": 1,
                     }
@@ -3673,7 +3915,7 @@ Build a registration result:
     def request_for(model: str, api_key: str) -> tuple[str, dict, dict]:
         if AI_API_STYLE == "openai":
             return (
-                f"{GEMINI_BASE_URL}/chat/completions",
+                openai_base_v1_url() + "/chat/completions",
                 {
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
@@ -3720,6 +3962,8 @@ Build a registration result:
     attempt_number = 0
     unavailable_models: set[str] = set()
     async with aiohttp.ClientSession(timeout=timeout) as session:
+        if AI_API_STYLE == "openai":
+            models = await resolve_openai_request_models(session, key_slots, models)
         for slot in key_slots:
             for model in models:
                 if model in unavailable_models:
@@ -4145,7 +4389,7 @@ async def request_ai_json(
     def request_for(model: str, api_key: str) -> tuple[str, dict, dict]:
         if AI_API_STYLE == "openai":
             return (
-                f"{GEMINI_BASE_URL}/chat/completions",
+                openai_base_v1_url() + "/chat/completions",
                 {
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
@@ -4179,6 +4423,8 @@ async def request_ai_json(
     key_slots = ai_key_order(assigned_key_number - 1)
     unavailable_models: set[str] = set()
     async with aiohttp.ClientSession(timeout=timeout) as session:
+        if AI_API_STYLE == "openai":
+            models = await resolve_openai_request_models(session, key_slots, models)
         for slot in key_slots:
             for model in models:
                 if model in unavailable_models:
