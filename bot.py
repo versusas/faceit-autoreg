@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v66-command-permissions-and-paintalk-match-2026-10-08"
+BOT_VERSION = "v67-guild-owner-admin-access-2026-10-08"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
@@ -352,27 +352,34 @@ async def save_command_permissions(data: dict[str, list[int]]) -> None:
     os.replace(temporary_file, COMMAND_PERMISSIONS_FILE)
 
 
-def permission_owner_ids() -> set[int]:
+def permission_owner_ids(message: Optional[discord.Message] = None) -> set[int]:
     owners: set[int] = set()
     if MY_ACCOUNT_ID > 0:
         owners.add(MY_ACCOUNT_ID)
     session_user_id = int(getattr(getattr(client, "user", None), "id", 0) or 0)
     if session_user_id > 0:
         owners.add(session_user_id)
+    
+    if message is not None:
+        guild = getattr(message, "guild", None)
+        if guild is not None:
+            owner_id = getattr(guild, "owner_id", 0)
+            if owner_id:
+                owners.add(int(owner_id))
     return owners
 
 
-def has_start_end_access(user_id: int) -> bool:
+def has_start_end_access(user_id: int, message: Optional[discord.Message] = None) -> bool:
     if user_id <= 0:
         return False
-    if user_id in permission_owner_ids():
+    if user_id in permission_owner_ids(message):
         return True
     permissions = load_command_permissions()
     return user_id in _normalize_user_id_set(permissions.get("start_end_user_ids"))
 
 
-def can_manage_permissions(user_id: int) -> bool:
-    return user_id > 0 and user_id in permission_owner_ids()
+def can_manage_permissions(user_id: int, message: Optional[discord.Message] = None) -> bool:
+    return user_id > 0 and user_id in permission_owner_ids(message)
 
 
 def extract_permission_target_user_id(
@@ -6614,7 +6621,7 @@ async def on_message(message: discord.Message) -> None:
         return
 
     if re.fullmatch(r"выдать\s+права(?:\s+.+)?", raw_command, re.I):
-        if not can_manage_permissions(author_id):
+        if not can_manage_permissions(author_id, message):
             await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
             return
         target_id = extract_permission_target_user_id(message, raw_command)
@@ -6640,7 +6647,7 @@ async def on_message(message: discord.Message) -> None:
         return
 
     if re.fullmatch(r"убрать\s+права(?:\s+.+)?", raw_command, re.I):
-        if not can_manage_permissions(author_id):
+        if not can_manage_permissions(author_id, message):
             await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
             return
         target_id = extract_permission_target_user_id(message, raw_command)
@@ -6666,7 +6673,7 @@ async def on_message(message: discord.Message) -> None:
         return
 
     if re.fullmatch(r"бот\s*,?\s*ты\s+тут\s*\?*", command, re.I):
-        if not can_manage_permissions(author_id):
+        if not can_manage_permissions(author_id, message):
             await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
             return
         configured_user = None
@@ -6778,7 +6785,7 @@ async def on_message(message: discord.Message) -> None:
         command,
         re.I,
     ):
-        if not can_manage_permissions(author_id):
+        if not can_manage_permissions(author_id, message):
             await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
             return
         registration_channel_ids = NORMAL_CHANNEL_IDS | PRIORITY_CHANNEL_IDS
@@ -6812,7 +6819,7 @@ async def on_message(message: discord.Message) -> None:
 
     forget_match = re.fullmatch(r"забыть\s+#?(\d+)", command, re.I)
     if forget_match:
-        if not can_manage_permissions(author_id):
+        if not can_manage_permissions(author_id, message):
             await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
             return
         match_id = int(forget_match.group(1))
@@ -6846,14 +6853,14 @@ async def on_message(message: discord.Message) -> None:
         return
 
     if command.startswith("забыть"):
-        if not can_manage_permissions(author_id):
+        if not can_manage_permissions(author_id, message):
             await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
             return
         await message.channel.send("Формат команды: `забыть 2548`")
         return
 
     if re.fullmatch(r"апи\s+состояние|состояние\s+апи|api\s+status|апи\s+статус|статус\s+апи", command, re.I):
-        if not can_manage_permissions(author_id):
+        if not can_manage_permissions(author_id, message):
             await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
             return
         await message.channel.send("⏳ Проверяю состояние API-ключей...")
@@ -6878,7 +6885,7 @@ async def on_message(message: discord.Message) -> None:
         return
 
     if command == "енд" or command.startswith("старт"):
-        if not has_start_end_access(author_id):
+        if not has_start_end_access(author_id, message):
             await message.channel.send(START_END_ACCESS_DENIED_TEXT)
             return
         if command == "енд":
