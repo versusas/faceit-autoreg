@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v69-telegram-html-fix-2026-10-09"
+BOT_VERSION = "v70-model-unavailable-fallback-2026-10-10"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
@@ -82,6 +82,15 @@ GEMINI_MODELS = [
     if model.strip()
 ]
 GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
+# Emergency fallback models tried when every configured model returns
+# model_temporarily_unavailable.  Only models not already in GEMINI_MODELS
+# are appended, so the operator's choice is always preferred.
+_EMERGENCY_FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
+]
 PROCESS_CONCURRENCY = max(1, int(os.getenv("PROCESS_CONCURRENCY", "2")))
 
 def parse_channel_ids(variable_name: str) -> set[int]:
@@ -988,6 +997,15 @@ def is_ai_key_exhausted(status: int, body: str) -> bool:
             re.I,
         )
     )
+
+
+def is_model_unavailable(status: int, body: str) -> bool:
+    """The model itself is down — retrying with another key won't help."""
+    if status == 503 and "model_temporarily_unavailable" in body:
+        return True
+    if status == 404 and re.search(r"is not found|models/", body, re.I):
+        return True
+    return False
 
 
 def short_ai_error(error: str) -> str:
@@ -3700,9 +3718,12 @@ Build a registration result:
     used_slot: Optional[dict] = None
     failures: list[str] = []
     attempt_number = 0
+    unavailable_models: set[str] = set()
     async with aiohttp.ClientSession(timeout=timeout) as session:
         for slot in key_slots:
             for model in models:
+                if model in unavailable_models:
+                    continue
                 url, headers, request_payload = request_for(model, slot["key"])
                 # Transient errors are retried only on the first attempt of
                 # the game; every other key/model pair gets one attempt.
@@ -3710,6 +3731,7 @@ Build a registration result:
                 attempt_number += 1
                 error = "нет ответа"
                 key_spent = False
+                model_down = False
                 for retry in range(tries):
                     try:
                         async with session.post(
@@ -3727,6 +3749,9 @@ Build a registration result:
                             slot["label"],
                             error,
                         )
+                        if is_model_unavailable(status, body):
+                            model_down = True
+                            break
                         if is_ai_key_exhausted(status, body):
                             key_spent = True
                             break
@@ -3746,11 +3771,90 @@ Build a registration result:
                     used_slot = slot
                     break
                 failures.append(f"{model} / {slot['label']}: {error}")
+                if model_down:
+                    unavailable_models.add(model)
+                    log.warning(
+                        "Модель %s помечена как недоступная, "
+                        "пропускаю для остальных ключей",
+                        model,
+                    )
+                    continue
                 if key_spent:
                     note_ai_key_exhausted(slot, error)
                     break
             if result is not None:
                 break
+
+        # --- Emergency fallback: try additional models when every configured
+        # model returned model_temporarily_unavailable. ----------------------
+        if result is None and unavailable_models:
+            emergency = [
+                m for m in _EMERGENCY_FALLBACK_MODELS
+                if m not in unavailable_models and m not in models
+            ]
+            if emergency:
+                log.warning(
+                    "Все настроенные модели недоступны (%s), "
+                    "пробую аварийные модели: %s",
+                    ", ".join(sorted(unavailable_models)),
+                    ", ".join(emergency),
+                )
+                for slot in key_slots:
+                    if ai_key_resting(slot):
+                        continue
+                    for model in emergency:
+                        if model in unavailable_models:
+                            continue
+                        url, headers, request_payload = request_for(
+                            model, slot["key"]
+                        )
+                        error = "нет ответа"
+                        model_down = False
+                        try:
+                            async with session.post(
+                                url,
+                                json=request_payload,
+                                headers=headers,
+                            ) as response:
+                                status = response.status
+                                body = await response.text()
+                            if status < 400:
+                                result = parse_model_output(
+                                    json.loads(body)
+                                )
+                            else:
+                                error = f"HTTP {status}: {body[:300]}"
+                                log.warning(
+                                    "ИИ (аварийная) %s (%s) вернул %s",
+                                    model,
+                                    slot["label"],
+                                    error,
+                                )
+                                if is_model_unavailable(status, body):
+                                    unavailable_models.add(model)
+                                    model_down = True
+                                elif is_ai_key_exhausted(status, body):
+                                    note_ai_key_exhausted(slot, error)
+                        except Exception as exc:
+                            error = (
+                                f"{type(exc).__name__}: {str(exc)[:300]}"
+                            )
+                            log.warning(
+                                "ИИ (аварийная) %s (%s): %s",
+                                model,
+                                slot["label"],
+                                error,
+                            )
+                        if result is not None:
+                            used_slot = slot
+                            break
+                        failures.append(
+                            f"{model} / {slot['label']}: {error}"
+                        )
+                        if model_down:
+                            continue
+                    if result is not None:
+                        break
 
     if result is None or used_slot is None:
         note_ai_all_failed()
@@ -4073,9 +4177,12 @@ async def request_ai_json(
         *(name for name in GEMINI_MODELS if name != assigned_model),
     ]
     key_slots = ai_key_order(assigned_key_number - 1)
+    unavailable_models: set[str] = set()
     async with aiohttp.ClientSession(timeout=timeout) as session:
         for slot in key_slots:
             for model in models:
+                if model in unavailable_models:
+                    continue
                 url, headers, payload = request_for(model, slot["key"])
                 try:
                     async with session.post(
@@ -4092,6 +4199,14 @@ async def request_ai_json(
                             status,
                             body[:200],
                         )
+                        if is_model_unavailable(status, body):
+                            unavailable_models.add(model)
+                            log.warning(
+                                "Модель %s помечена как недоступная "
+                                "(повторное чтение 0/0/13)",
+                                model,
+                            )
+                            continue
                         if is_ai_key_exhausted(status, body):
                             note_ai_key_exhausted(
                                 slot, f"HTTP {status}: {body[:300]}"
@@ -4116,6 +4231,62 @@ async def request_ai_json(
                         type(exc).__name__,
                         str(exc)[:200],
                     )
+
+        # Emergency fallback for request_ai_json
+        if unavailable_models:
+            emergency = [
+                m for m in _EMERGENCY_FALLBACK_MODELS
+                if m not in unavailable_models and m not in models
+            ]
+            if emergency:
+                log.warning(
+                    "Повторное чтение 0/0/13: пробую аварийные модели: %s",
+                    ", ".join(emergency),
+                )
+                for slot in key_slots:
+                    if ai_key_resting(slot):
+                        continue
+                    for model in emergency:
+                        if model in unavailable_models:
+                            continue
+                        url, headers, payload = request_for(model, slot["key"])
+                        try:
+                            async with session.post(
+                                url, json=payload, headers=headers
+                            ) as response:
+                                status = response.status
+                                body = await response.text()
+                            if status >= 400:
+                                log.warning(
+                                    "Повторное чтение (аварийная) %s (%s): "
+                                    "HTTP %s: %s",
+                                    model,
+                                    slot["label"],
+                                    status,
+                                    body[:200],
+                                )
+                                if is_model_unavailable(status, body):
+                                    unavailable_models.add(model)
+                                    continue
+                                if is_ai_key_exhausted(status, body):
+                                    note_ai_key_exhausted(
+                                        slot, f"HTTP {status}: {body[:300]}"
+                                    )
+                                    break
+                                continue
+                            parsed = parse_ai_json_answer(json.loads(body))
+                            if parsed is not None:
+                                note_ai_key_success(slot)
+                                return parsed
+                        except Exception as exc:
+                            log.warning(
+                                "Повторное чтение (аварийная) %s (%s): %s: %s",
+                                model,
+                                slot["label"],
+                                type(exc).__name__,
+                                str(exc)[:200],
+                            )
+
     return None
 
 
