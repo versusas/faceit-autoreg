@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v78-tg-username-access-2026-10-10"
+BOT_VERSION = "v79-tg-access-by-username-fix-2026-10-10"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
@@ -7235,6 +7235,51 @@ async def on_message(message: discord.Message) -> None:
 
     if command == "команды":
         await message.channel.send(COMMANDS_HELP_TEXT)
+        return
+
+    # ── Telegram rights from Discord ──
+    tg_grant_match = re.fullmatch(
+        r"выдать\s+права\s+тг\s+@?([A-Za-z0-9_]{3,32})",
+        raw_command,
+        re.I,
+    )
+    if tg_grant_match:
+        if not can_manage_permissions(author_id, message):
+            await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
+            return
+        tg_target = tg_grant_match.group(1).lower()
+        from tg_bot import grant_tg_access as _grant_tg
+        ok = _grant_tg(tg_target, f"добавлен из Discord пользователем {author_id}")
+        if ok:
+            await message.channel.send(
+                f"✅ TG-пользователю `@{tg_target}` выдан доступ к Telegram-боту."
+            )
+        else:
+            await message.channel.send(
+                f"ℹ️ У `@{tg_target}` уже есть доступ к Telegram-боту."
+            )
+        return
+
+    tg_revoke_match = re.fullmatch(
+        r"убрать\s+права\s+тг\s+@?([A-Za-z0-9_]{3,32})",
+        raw_command,
+        re.I,
+    )
+    if tg_revoke_match:
+        if not can_manage_permissions(author_id, message):
+            await message.channel.send(OWNER_ACCESS_DENIED_TEXT)
+            return
+        tg_target = tg_revoke_match.group(1).lower()
+        from tg_bot import revoke_tg_access as _revoke_tg
+        ok = _revoke_tg(tg_target)
+        if ok:
+            await message.channel.send(
+                f"✅ У TG-пользователя `@{tg_target}` забран доступ."
+            )
+        else:
+            await message.channel.send(
+                f"ℹ️ У `@{tg_target}` не было доступа к Telegram-боту."
+            )
         return
 
     if re.fullmatch(r"выдать\s+права(?:\s+.+)?", raw_command, re.I):

@@ -1105,8 +1105,8 @@ async def handle_callback(session: aiohttp.ClientSession, callback: dict) -> Non
         user_pending_action[user_id] = "tg_grant"
         await edit_message(
             session, chat_id, message_id,
-            "✏️ Отправьте <b>Telegram ID</b> или перешлите сообщение пользователя.\n"
-            "Формат: <code>ID метка</code> (метка опциональна).",
+            "✏️ Отправьте <b>@username</b>, <b>Telegram ID</b> или перешлите сообщение пользователя.\n"
+            "Примеры: <code>@appoezFPL</code> или <code>123456789</code>",
             reply_markup=back_keyboard(),
         )
 
@@ -1118,7 +1118,7 @@ async def handle_callback(session: aiohttp.ClientSession, callback: dict) -> Non
         user_pending_action[user_id] = "tg_revoke"
         await edit_message(
             session, chat_id, message_id,
-            "✏️ Отправьте <b>Telegram ID</b> для снятия доступа:",
+            "✏️ Отправьте <b>@username</b> или <b>Telegram ID</b> для снятия доступа:",
             reply_markup=back_keyboard(),
         )
 
@@ -1176,12 +1176,21 @@ async def handle_text_input(
         if not is_root_admin(user_id):
             await send_message(session, chat_id, "🚫 Только root-admin.", reply_markup=back_keyboard())
             return
-        match = re.search(r"\d{4,15}", text)
-        if not match:
-            await send_message(session, chat_id, "⚠️ Не нашёл TG ID.", reply_markup=back_keyboard())
+        match_id = re.search(r"\d{4,15}", text)
+        match_user = re.search(r"@?([A-Za-z][A-Za-z0-9_]{3,31})", text)
+        if not match_id and not match_user:
+            await send_message(
+                session, chat_id,
+                "⚠️ Отправьте TG ID (число) или @username.",
+                reply_markup=back_keyboard(),
+            )
             return
-        target = int(match.group(0))
-        label = text.replace(match.group(0), "").strip()[:100]
+        if match_id:
+            target = match_id.group(0)
+            label = text.replace(target, "").strip()[:100]
+        else:
+            target = match_user.group(1).lower()
+            label = text.replace(match_user.group(0), "").strip()[:100]
         ok = grant_tg_access(target, label)
         msg = f"✅ TG-доступ выдан: <code>{target}</code>" if ok else f"ℹ️ Уже есть: <code>{target}</code>"
         await send_message(session, chat_id, msg, reply_markup=back_keyboard())
@@ -1190,11 +1199,16 @@ async def handle_text_input(
         if not is_root_admin(user_id):
             await send_message(session, chat_id, "🚫 Только root-admin.", reply_markup=back_keyboard())
             return
-        match = re.search(r"\d{4,15}", text)
-        if not match:
-            await send_message(session, chat_id, "⚠️ Не нашёл TG ID.", reply_markup=back_keyboard())
+        match_id = re.search(r"\d{4,15}", text)
+        match_user = re.search(r"@?([A-Za-z][A-Za-z0-9_]{3,31})", text)
+        if not match_id and not match_user:
+            await send_message(
+                session, chat_id,
+                "⚠️ Отправьте TG ID (число) или @username.",
+                reply_markup=back_keyboard(),
+            )
             return
-        target = int(match.group(0))
+        target = match_id.group(0) if match_id else match_user.group(1).lower()
         ok = revoke_tg_access(target)
         msg = f"✅ TG-доступ убран: <code>{target}</code>" if ok else f"ℹ️ Не было доступа: <code>{target}</code>"
         await send_message(session, chat_id, msg, reply_markup=back_keyboard())
