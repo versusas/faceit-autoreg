@@ -339,10 +339,11 @@ def _save_tg_perms(data: dict) -> None:
     os.replace(tmp, TG_PERMISSIONS_FILE)
 
 
-def grant_tg_access(tg_user_id: int, label: str = "") -> bool:
+def grant_tg_access(identifier: str, label: str = "") -> bool:
+    """identifier can be numeric ID or @username (without @)."""
     data = _load_tg_perms()
     allowed: dict = data.get("allowed_users", {})
-    key = str(tg_user_id)
+    key = str(identifier).lower().lstrip("@")
     if key in allowed:
         return False
     allowed[key] = {"label": label, "granted_at": datetime.now(timezone.utc).isoformat()}
@@ -351,10 +352,10 @@ def grant_tg_access(tg_user_id: int, label: str = "") -> bool:
     return True
 
 
-def revoke_tg_access(tg_user_id: int) -> bool:
+def revoke_tg_access(identifier: str) -> bool:
     data = _load_tg_perms()
     allowed: dict = data.get("allowed_users", {})
-    key = str(tg_user_id)
+    key = str(identifier).lower().lstrip("@")
     if key not in allowed:
         return False
     del allowed[key]
@@ -371,10 +372,15 @@ def is_root_admin(user_id: int) -> bool:
     return user_id in TELEGRAM_ADMIN_IDS
 
 
-def has_access(user_id: int) -> bool:
+def has_access(user_id: int, username: Optional[str] = None) -> bool:
     if is_root_admin(user_id):
         return True
-    return str(user_id) in _load_tg_perms().get("allowed_users", {})
+    allowed = _load_tg_perms().get("allowed_users", {})
+    if str(user_id) in allowed:
+        return True
+    if username and str(username).lower().lstrip("@") in allowed:
+        return True
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -900,12 +906,13 @@ ACCESS_DENIED_TEXT = "🚫 <b>Нет доступа</b>\n\nУ вас нет пр
 async def handle_callback(session: aiohttp.ClientSession, callback: dict) -> None:
     cb_id = callback["id"]
     user_id = int(callback["from"]["id"])
+    username = callback["from"].get("username")
     data = callback.get("data", "")
     msg = callback.get("message", {})
     chat_id = msg.get("chat", {}).get("id", 0)
     message_id = msg.get("message_id", 0)
 
-    if not has_access(user_id):
+    if not has_access(user_id, username):
         await answer_callback(session, cb_id, "🚫 Нет доступа", show_alert=True)
         return
 
@@ -1132,7 +1139,7 @@ async def handle_text_input(
     action = user_pending_action.pop(user_id, None)
     if not action:
         return
-    if not has_access(user_id):
+    if not has_access(user_id, username):
         await send_message(session, chat_id, ACCESS_DENIED_TEXT)
         return
 
@@ -1209,6 +1216,7 @@ async def handle_update(session: aiohttp.ClientSession, update: dict) -> None:
 
     chat_id = msg["chat"]["id"]
     user_id = int(msg.get("from", {}).get("id", 0))
+    username = msg.get("from", {}).get("username")
     text = (msg.get("text") or "").strip()
 
     # Forward → TG grant
@@ -1234,7 +1242,7 @@ async def handle_update(session: aiohttp.ClientSession, update: dict) -> None:
     # /start → main menu
     cmd_raw = text.split()[0].lower().lstrip("/").split("@")[0]
     if cmd_raw in ("start", "menu", "команды", "help"):
-        if not has_access(user_id):
+        if not has_access(user_id, username):
             await send_message(session, chat_id, ACCESS_DENIED_TEXT)
             return
         await send_message(
@@ -1243,7 +1251,7 @@ async def handle_update(session: aiohttp.ClientSession, update: dict) -> None:
             reply_markup=main_menu_keyboard(user_id),
         )
     elif cmd_raw in ("стата", "stats"):
-        if not has_access(user_id):
+        if not has_access(user_id, username):
             await send_message(session, chat_id, ACCESS_DENIED_TEXT)
             return
         stats = compute_stats("today")
