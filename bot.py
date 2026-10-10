@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v74-tg-command-response-feedback-2026-10-10"
+BOT_VERSION = "v75-fix-model-resolve-and-tg-timeout-2026-10-10"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
@@ -1203,7 +1203,12 @@ async def resolve_openai_request_models(
     key_slots: list[dict],
     requested_models: list[str],
 ) -> list[str]:
-    """Resolve configured model names to models the proxy actually exposes."""
+    """Resolve configured model names to models the proxy actually exposes.
+
+    Configured models that exist in the provider's catalog are always tried
+    first, in their original order.  Only when NONE of them are found the
+    ranked catalog is used as a fallback.
+    """
     if AI_API_STYLE != "openai":
         return list(dict.fromkeys(requested_models))
 
@@ -1216,21 +1221,42 @@ async def resolve_openai_request_models(
             break
 
     if not available:
+        log.info("Провайдер /v1/models недоступен, использую настроенные модели как есть")
         return list(dict.fromkeys(requested_models))
 
+    available_lower = {m.casefold() for m in available}
+
+    # Keep configured models that the provider actually has (exact match)
+    exact_hits: list[str] = []
+    for m in requested_models:
+        if m.strip() and m.casefold() in available_lower:
+            exact_hits.append(m)
+
+    if exact_hits:
+        # Configured models found — use them first, then append other
+        # ranked catalog models as fallbacks.
+        remaining = rank_openai_models(requested_models, [
+            m for m in available if m.casefold() not in {h.casefold() for h in exact_hits}
+        ])
+        result = list(dict.fromkeys(exact_hits + remaining))
+        log.info(
+            "Модели из конфига найдены у провайдера: %s (+ %d запасных)",
+            ", ".join(exact_hits), len(remaining),
+        )
+        return result
+
+    # None of the configured models exist — fall back to ranked catalog
     ranked = rank_openai_models(requested_models, available)
     if not ranked:
         return list(dict.fromkeys(requested_models))
 
-    requested_set = {normalize_model_token(model) for model in requested_models if model.strip()}
-    if requested_set and normalize_model_token(ranked[0]) not in requested_set:
-        log.warning(
-            "Провайдер OpenAI не знает настроенные модели (%s). "
-            "Автоматически использую %s из /v1/models (%s).",
-            ", ".join(requested_models),
-            ranked[0],
-            source_label or "каталог провайдера",
-        )
+    log.warning(
+        "Провайдер OpenAI не знает настроенные модели (%s). "
+        "Автоматически использую %s из /v1/models (%s).",
+        ", ".join(requested_models),
+        ranked[0],
+        source_label or "каталог провайдера",
+    )
     return ranked
 
 

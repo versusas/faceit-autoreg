@@ -687,14 +687,20 @@ async def tg_request(
     **kwargs,
 ) -> Optional[dict]:
     url = f"{TG_API}/{method}"
+    # Long-polling getUpdates needs a longer HTTP timeout than the poll timeout
+    req_timeout = kwargs.get("timeout", 0)
+    http_timeout = max(20, int(req_timeout) + 10) if isinstance(req_timeout, (int, float)) else 60
     try:
-        async with session.post(url, json=kwargs, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+        async with session.post(url, json=kwargs, timeout=aiohttp.ClientTimeout(total=http_timeout)) as resp:
             data = await resp.json()
             if not data.get("ok"):
                 log.warning("TG API %s error: %s", method, data)
             return data
     except Exception as exc:
-        log.warning("TG API %s exception: %s", method, exc)
+        if method != "getUpdates":
+            log.warning("TG API %s exception: %s: %s", method, type(exc).__name__, exc)
+        else:
+            log.debug("TG API getUpdates: %s: %s", type(exc).__name__, exc)
         return None
 
 
