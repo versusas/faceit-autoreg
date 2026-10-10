@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v72-tg-bot-buttons-and-permissions-2026-10-10"
+BOT_VERSION = "v74-tg-command-response-feedback-2026-10-10"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
@@ -504,14 +504,17 @@ async def process_tg_commands() -> None:
         pending: list[dict] = data.get("pending", [])
         if not pending:
             return
-        remaining: list[dict] = []
+        responses: dict = data.get("responses", {})
         for item in pending:
             cmd = str(item.get("cmd", "")).strip().lower()
-            log.info("ТГ-команда получена: %r", cmd)
+            cmd_id = str(item.get("id", ""))
+            log.info("ТГ-команда получена: %r (id=%s)", cmd, cmd_id)
+            response_text = ""
             try:
                 if cmd == "енд":
                     is_active = False
                     active_channel_ids.clear()
+                    response_text = "⏹ Авторег остановлен"
                     log.info("ТГ: авторег остановлен")
                 elif cmd.startswith("старт"):
                     mode_part = cmd.removeprefix("старт").strip()
@@ -526,14 +529,33 @@ async def process_tg_commands() -> None:
                         active_channel_ids.clear()
                         active_channel_ids.update(selected)
                         is_active = True
+                        response_text = f"▶️ Авторег запущен ({len(selected)} каналов)"
                         log.info("ТГ: авторег запущен, каналы: %s", selected)
                     else:
+                        response_text = f"⚠️ Нет каналов для режима «{mode_part}»"
                         log.warning("ТГ: нет каналов для режима %r", mode_part)
+                elif cmd == "статус":
+                    channels = len(active_channel_ids)
+                    response_text = (
+                        f"{'🟢' if is_active else '🔴'} "
+                        f"Авторег: {'активен' if is_active else 'остановлен'}, "
+                        f"каналов: {channels}"
+                    )
                 else:
+                    response_text = f"❓ Неизвестная команда: {cmd}"
                     log.warning("ТГ: неизвестная команда %r, пропускаю", cmd)
             except Exception:
+                response_text = f"❌ Ошибка выполнения: {cmd}"
                 log.exception("ТГ: ошибка выполнения команды %r", cmd)
-        data["pending"] = remaining
+            if cmd_id and response_text:
+                responses[cmd_id] = {
+                    "text": response_text,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "is_active": is_active,
+                    "channels": len(active_channel_ids),
+                }
+        data["pending"] = []
+        data["responses"] = responses
         save_tg_commands_data(data)
 
 

@@ -174,14 +174,82 @@ def save_tg_commands(data: dict) -> None:
     os.replace(tmp, TG_COMMANDS_FILE)
 
 
-def push_tg_command(cmd: str, args: str = "") -> None:
+def push_tg_command(cmd: str, args: str = "") -> str:
+    """Push a command and return its unique id for response tracking."""
+    import uuid
+    cmd_id = uuid.uuid4().hex[:12]
     data = load_tg_commands()
     data.setdefault("pending", []).append({
+        "id": cmd_id,
         "cmd": cmd,
         "args": args,
         "ts": datetime.now(timezone.utc).isoformat(),
     })
     save_tg_commands(data)
+    return cmd_id
+
+
+def poll_tg_response(cmd_id: str) -> Optional[dict]:
+    """Check if Discord bot wrote a response for this command id."""
+    data = load_tg_commands()
+    responses = data.get("responses", {})
+    return responses.get(cmd_id)
+
+
+def clear_tg_response(cmd_id: str) -> None:
+    """Remove a consumed response."""
+    data = load_tg_commands()
+    responses = data.get("responses", {})
+    if cmd_id in responses:
+        del responses[cmd_id]
+        data["responses"] = responses
+        save_tg_commands(data)
+
+
+async def send_command_and_wait(
+    session: aiohttp.ClientSession,
+    chat_id: int,
+    message_id: int,
+    cmd: str,
+    pending_text: str,
+) -> None:
+    """Send a command to Discord bot and wait for response, updating the message."""
+    cmd_id = push_tg_command(cmd)
+
+    # Show pending state
+    await edit_message(
+        session, chat_id, message_id,
+        f"⏳ {pending_text}...",
+        reply_markup=back_keyboard(),
+    )
+
+    # Poll for response (max ~12 seconds)
+    response = None
+    for _ in range(24):
+        await asyncio.sleep(0.5)
+        response = poll_tg_response(cmd_id)
+        if response:
+            break
+
+    if response:
+        clear_tg_response(cmd_id)
+        is_active = response.get("is_active", False)
+        channels = response.get("channels", 0)
+        text = response.get("text", "✅ Выполнено")
+        status_line = f"\n\n{'🟢' if is_active else '🔴'} Статус: {'активен' if is_active else 'остановлен'} · Каналов: {channels}"
+        await edit_message(
+            session, chat_id, message_id,
+            f"{text}{status_line}",
+            reply_markup=back_keyboard(),
+        )
+    else:
+        await edit_message(
+            session, chat_id, message_id,
+            f"⚠️ Команда отправлена, но Discord-бот не ответил за 12 сек.\n"
+            f"Команда: <code>{cmd}</code>\n\n"
+            f"Возможно бот перезапускается или файл очереди недоступен.",
+            reply_markup=back_keyboard(),
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -853,22 +921,20 @@ async def handle_callback(session: aiohttp.ClientSession, callback: dict) -> Non
 
     elif data.startswith("start:"):
         mode = data.split(":", 1)[1]
-        push_tg_command(f"старт {mode}")
-        await answer_callback(session, cb_id, f"✅ старт {mode}")
-        await edit_message(
+        await answer_callback(session, cb_id, f"⏳ старт {mode}...")
+        await send_command_and_wait(
             session, chat_id, message_id,
-            f"✅ Команда <b>старт {mode}</b> отправлена.",
-            reply_markup=back_keyboard(),
+            f"старт {mode}",
+            f"Запускаю авторег ({mode})",
         )
 
     # ── Stop ──
     elif data == "cmd:stop":
-        push_tg_command("енд")
-        await answer_callback(session, cb_id, "⏹ Стоп отправлен")
-        await edit_message(
+        await answer_callback(session, cb_id, "⏳ Останавливаю...")
+        await send_command_and_wait(
             session, chat_id, message_id,
-            "⏹ Команда <b>стоп</b> отправлена.",
-            reply_markup=back_keyboard(),
+            "енд",
+            "Останавливаю авторег",
         )
 
     # ── Stats with period switching ──
@@ -897,17 +963,43 @@ async def handle_callback(session: aiohttp.ClientSession, callback: dict) -> Non
 
     # ── Status ──
     elif data == "cmd:status":
-        await answer_callback(session, cb_id)
+        await answer_callback(session, cb_id, "⏳ Запрашиваю...")
+        # Ask Discord bot for live status
+        cmd_id = push_tg_command("статус")
+        await edit_message(
+            session, chat_id, message_id,
+            "⏳ Запрашиваю статус у Discord-бота...",
+            reply_markup=back_keyboard(),
+        )
+        response = None
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            response = poll_tg_response(cmd_id)
+            if response:
+                break
         granted_dc = list_discord_access()
         granted_tg = list_tg_access()
-        pending = load_tg_commands().get("pending", [])
-        text = (
-            "📡 <b>Состояние</b>\n\n"
-            f"Discord-пользователей с правами: <b>{len(granted_dc)}</b>\n"
-            f"TG-пользователей с доступом: <b>{len(granted_tg)}</b>\n"
-            f"Root-админов (env): <b>{len(TELEGRAM_ADMIN_IDS)}</b>\n"
-            f"Команд в очереди: <b>{len(pending)}</b>"
-        )
+        if response:
+            clear_tg_response(cmd_id)
+            is_active = response.get("is_active", False)
+            channels = response.get("channels", 0)
+            status_emoji = "🟢" if is_active else "🔴"
+            status_text = "активен" if is_active else "остановлен"
+            text = (
+                f"📡 <b>Состояние</b>\n\n"
+                f"Авторег: {status_emoji} <b>{status_text}</b>\n"
+                f"Каналов: <b>{channels}</b>\n"
+                f"Discord-пользователей с правами: <b>{len(granted_dc)}</b>\n"
+                f"TG-пользователей с доступом: <b>{len(granted_tg)}</b>\n"
+                f"Root-админов (env): <b>{len(TELEGRAM_ADMIN_IDS)}</b>"
+            )
+        else:
+            text = (
+                f"📡 <b>Состояние</b>\n\n"
+                f"⚠️ Discord-бот не ответил на запрос статуса.\n\n"
+                f"Discord-пользователей с правами: <b>{len(granted_dc)}</b>\n"
+                f"TG-пользователей с доступом: <b>{len(granted_tg)}</b>"
+            )
         await edit_message(session, chat_id, message_id, text, reply_markup=back_keyboard())
 
     # ── Logs ──
