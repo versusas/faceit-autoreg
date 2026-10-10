@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v79-tg-access-by-username-fix-2026-10-10"
+BOT_VERSION = "v80-data-path-permissions-fix-2026-10-10"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
@@ -166,6 +166,13 @@ def normalize_nickname(value: object) -> str:
         return "bangnick"
     text = unicodedata.normalize("NFKD", text).casefold()
     text = text.translate(_CYRILLIC_TO_LATIN)
+    
+    # Translate basic leetspeak to letters for better fuzzy matching
+    # Only do this if the word isn't purely numeric
+    if not re.fullmatch(r"\d+", text):
+        leetspeak = str.maketrans({"0": "o", "3": "e", "4": "a", "1": "i", "5": "s"})
+        text = text.translate(leetspeak)
+
     normalized = "".join(character for character in text if character.isalnum())
     return normalized or text.strip().casefold()
 
@@ -300,7 +307,7 @@ WARNING_ELIGIBLE_ROLE_FRAGMENTS = {
 MY_ACCOUNT_ID = int(os.getenv("MY_ACCOUNT_ID", "0"))
 COMMAND_PERMISSIONS_FILE = os.getenv(
     "COMMAND_PERMISSIONS_FILE",
-    "/data/command_permissions.json",
+    "./data/command_permissions.json",
 )
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.82"))
 BACKFILL_LIMIT = int(os.getenv("BACKFILL_LIMIT", "500"))
@@ -317,9 +324,9 @@ REGISTRATION_CONFIRM_TIMEOUT = float(
     os.getenv("REGISTRATION_CONFIRM_TIMEOUT", "25.0")
 )
 PLAYER_MODAL_TIMEOUT = float(os.getenv("PLAYER_MODAL_TIMEOUT", "12.0"))
-STATS_FILE = os.getenv("STATS_FILE", "/data/registration_stats.json")
+STATS_FILE = os.getenv("STATS_FILE", "./data/registration_stats.json")
 STATS_TIMEZONE = ZoneInfo(os.getenv("STATS_TIMEZONE", "Europe/Moscow"))
-TG_COMMANDS_FILE = os.getenv("TG_COMMANDS_FILE", "/data/tg_commands.json")
+TG_COMMANDS_FILE = os.getenv("TG_COMMANDS_FILE", "./data/tg_commands.json")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -7238,8 +7245,8 @@ async def on_message(message: discord.Message) -> None:
         return
 
     # ── Telegram rights from Discord ──
-    tg_grant_match = re.fullmatch(
-        r"выдать\s+права\s+тг\s+@?([A-Za-z0-9_]{3,32})",
+    tg_grant_match = re.match(
+        r"^[!/]?выдать\s+права\s+тг\s+@?([A-Za-z0-9_]{3,32})",
         raw_command,
         re.I,
     )
@@ -7260,8 +7267,8 @@ async def on_message(message: discord.Message) -> None:
             )
         return
 
-    tg_revoke_match = re.fullmatch(
-        r"убрать\s+права\s+тг\s+@?([A-Za-z0-9_]{3,32})",
+    tg_revoke_match = re.match(
+        r"^[!/]?убрать\s+права\s+тг\s+@?([A-Za-z0-9_]{3,32})",
         raw_command,
         re.I,
     )

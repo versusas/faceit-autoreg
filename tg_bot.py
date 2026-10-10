@@ -36,13 +36,13 @@ TELEGRAM_ADMIN_IDS: set[int] = {
     for x in os.getenv("TELEGRAM_ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
 }
-STATS_FILE = os.getenv("STATS_FILE", "/data/registration_stats.json")
+STATS_FILE = os.getenv("STATS_FILE", "./data/registration_stats.json")
 COMMAND_PERMISSIONS_FILE = os.getenv(
-    "COMMAND_PERMISSIONS_FILE", "/data/command_permissions.json"
+    "COMMAND_PERMISSIONS_FILE", "./data/command_permissions.json"
 )
-TG_COMMANDS_FILE = os.getenv("TG_COMMANDS_FILE", "/data/tg_commands.json")
+TG_COMMANDS_FILE = os.getenv("TG_COMMANDS_FILE", "./data/tg_commands.json")
 TG_PERMISSIONS_FILE = os.getenv(
-    "TG_PERMISSIONS_FILE", "/data/tg_permissions.json"
+    "TG_PERMISSIONS_FILE", "./data/tg_permissions.json"
 )
 STATS_TIMEZONE = ZoneInfo(os.getenv("STATS_TIMEZONE", "Europe/Moscow"))
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
