@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v76-tg-start-backfill-fix-2026-10-10"
+BOT_VERSION = "v77-error-reason-logging-2026-10-10"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
@@ -616,33 +616,48 @@ async def tg_command_polling_task() -> None:
 
 
 async def registration_exists(match_id: int) -> bool:
-    """Return whether this match is already present in persistent history."""
+    """Return whether this match is already present in persistent history as successful."""
     async with stats_lock:
         return any(
             str(item.get("match_id")) == str(match_id)
+            and item.get("kind", "registered") in ("registered", "already")
             for item in load_registration_records()
         )
 
 
 async def record_registration(
-    match_id: int,
+    match_id: object,
     posted_at: Optional[datetime] = None,
     kind: str = "registered",
+    **extra_fields,
 ) -> bool:
-    """Save a match; return False when it is already in history.
+    """Save a match; return False when it is already in history as successful.
 
-    `posted_at` is when the game card came into the channel: statistics count
-    games by that time, so a backlog registered at once does not look like
-    many games in the last minutes. kind="already" marks a match the
-    registration bot reported as entered earlier; it is not counted.
+    If kind="error", it will overwrite any existing "error" record for this match,
+    but it won't overwrite a successful registration.
     """
+    try:
+        clean_id = int(str(match_id).strip("# "))
+    except (TypeError, ValueError):
+        return False
+
     async with stats_lock:
         records = load_registration_records()
-        if any(str(item.get("match_id")) == str(match_id) for item in records):
-            return False
+        existing_idx = None
+        for i, item in enumerate(records):
+            if str(item.get("match_id")) == str(clean_id):
+                existing_idx = i
+                break
+
+        if existing_idx is not None:
+            existing_kind = records[existing_idx].get("kind", "registered")
+            if existing_kind in ("registered", "already"):
+                return False
+            # Overwrite previous error
+            records.pop(existing_idx)
 
         record = {
-            "match_id": int(match_id),
+            "match_id": clean_id,
             "registered_at": datetime.now(timezone.utc).isoformat(),
         }
         if isinstance(posted_at, datetime):
@@ -651,6 +666,10 @@ async def record_registration(
             record["card_posted_at"] = posted_at.astimezone(timezone.utc).isoformat()
         if kind != "registered":
             record["kind"] = kind
+
+        for k, v in extra_fields.items():
+            record[k] = v
+
         records.append(record)
         try:
             directory = os.path.dirname(STATS_FILE)
@@ -4861,6 +4880,14 @@ async def send_processing_error_log(
     diagnostics: str,
 ) -> None:
     """Send processing errors, score and all player stats to the Discord log channel."""
+    # Write the error to stats file so TG bot logs can show the reason
+    await record_registration(
+        match_id,
+        posted_at=getattr(source_message, "created_at", None),
+        kind="error",
+        error_reason=reason[:1000],
+    )
+
     if not LOG_CHANNEL_ID:
         return
     try:

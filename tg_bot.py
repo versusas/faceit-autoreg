@@ -669,6 +669,13 @@ def format_game_log(match_id: int) -> str:
 
     # Show any extra fields
     skip_keys = {"match_id", "registered_at", "card_posted_at", "kind"}
+    
+    # Prioritize error reason if it exists
+    error_reason = record.get("error_reason")
+    if error_reason:
+        lines.append(f"\n<b>Причина:</b>\n<code>{str(error_reason)[:300]}</code>")
+        skip_keys.add("error_reason")
+
     for key, val in record.items():
         if key not in skip_keys and val is not None:
             display_val = str(val)[:200]
