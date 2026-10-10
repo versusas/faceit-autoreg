@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v75-fix-model-resolve-and-tg-timeout-2026-10-10"
+BOT_VERSION = "v76-tg-start-backfill-fix-2026-10-10"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
@@ -496,6 +496,47 @@ def save_tg_commands_data(data: dict) -> None:
     os.replace(tmp, TG_COMMANDS_FILE)
 
 
+def tg_mode_selection(mode_part: str) -> tuple[str, set[int]]:
+    modes = {
+        "обычный": ("обычный", NORMAL_CHANNEL_IDS),
+        "приоритет": ("приоритет", PRIORITY_CHANNEL_IDS),
+        "все": ("обычный + приоритет", NORMAL_CHANNEL_IDS | PRIORITY_CHANNEL_IDS),
+        "": ("обычный + приоритет", NORMAL_CHANNEL_IDS | PRIORITY_CHANNEL_IDS),
+    }
+    return modes.get(mode_part, ("обычный + приоритет", NORMAL_CHANNEL_IDS | PRIORITY_CHANNEL_IDS))
+
+
+async def run_tg_backfill(selected_ids: set[int], started_at: datetime, mode_name: str) -> None:
+    """Mirror Discord `старт` behaviour for Telegram start commands."""
+    try:
+        reports = await asyncio.gather(
+            *(backfill_one_channel_report(channel_id, started_at) for channel_id in sorted(selected_ids))
+        )
+        count = sum(report.get("found", 0) for report in reports)
+        lines: list[str] = []
+        for report in reports:
+            label = str(report.get("label") or "канал")
+            if report.get("error"):
+                lines.append(f"• {label}: ❌ {report['error']}")
+            else:
+                lines.append(
+                    f"• {label}: прочитано сообщений {report.get('scanned', 0)}, "
+                    f"новых карточек {report.get('found', 0)}"
+                )
+        summary = (
+            f"✅ ТГ-старт: архив режима «{mode_name}» проверен. "
+            f"Найдено изображений: {count}.\n" + "\n".join(lines)
+        )[:1900]
+        log.info(summary)
+        await notify_log_channel(summary)
+    except Exception:
+        log.exception("ТГ: ошибка backfill после старта режима %s", mode_name)
+        await notify_log_channel(
+            f"❌ ТГ-старт: не удалось дочитать архив режима «{mode_name}». "
+            "Смотрите Railway Deploy Logs."
+        )
+
+
 async def process_tg_commands() -> None:
     """Periodically poll the TG commands file and execute pending commands."""
     global is_active
@@ -518,21 +559,26 @@ async def process_tg_commands() -> None:
                     log.info("ТГ: авторег остановлен")
                 elif cmd.startswith("старт"):
                     mode_part = cmd.removeprefix("старт").strip()
-                    modes = {
-                        "обычный": NORMAL_CHANNEL_IDS,
-                        "приоритет": PRIORITY_CHANNEL_IDS,
-                        "все": NORMAL_CHANNEL_IDS | PRIORITY_CHANNEL_IDS,
-                        "": NORMAL_CHANNEL_IDS | PRIORITY_CHANNEL_IDS,
-                    }
-                    selected = modes.get(mode_part, NORMAL_CHANNEL_IDS | PRIORITY_CHANNEL_IDS)
+                    mode_name, selected = tg_mode_selection(mode_part)
                     if selected:
                         active_channel_ids.clear()
                         active_channel_ids.update(selected)
                         is_active = True
-                        response_text = f"▶️ Авторег запущен ({len(selected)} каналов)"
-                        log.info("ТГ: авторег запущен, каналы: %s", selected)
+                        started_at = datetime.now(timezone.utc)
+                        asyncio.get_event_loop().create_task(
+                            run_tg_backfill(set(selected), started_at, mode_name)
+                        )
+                        response_text = (
+                            f"▶️ Авторег запущен ({len(selected)} каналов). "
+                            "Архив читается в фоне."
+                        )
+                        log.info(
+                            "ТГ: авторег запущен, каналы: %s; backfill режима %s запущен",
+                            selected,
+                            mode_name,
+                        )
                     else:
-                        response_text = f"⚠️ Нет каналов для режима «{mode_part}»"
+                        response_text = f"⚠️ Нет каналов для режима «{mode_name}»"
                         log.warning("ТГ: нет каналов для режима %r", mode_part)
                 elif cmd == "статус":
                     channels = len(active_channel_ids)
