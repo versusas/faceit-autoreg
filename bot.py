@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v71-openai-model-autodiscovery-2026-10-10"
+BOT_VERSION = "v72-tg-bot-buttons-and-permissions-2026-10-10"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
