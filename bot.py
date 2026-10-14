@@ -3278,10 +3278,83 @@ def result_from_card_and_visual_audit(
             unmatched_card_indices = []
             unused_visual_indices = []
 
-        # Every unused visible row means that one unmatched roster player was
-        # shown under a different nickname. Any remaining unmatched roster
-        # slots were not visible on the screenshot at all. Pair only for the
-        # warning reason; the recognition/matching result itself is unchanged.
+        # Partial scoreboards can still contain a visible row that the strict
+        # first pass missed because of OCR damage in the nickname. Recover only
+        # mutual best pairs with a clear margin; a visible player must not be
+        # zeroed just because one character of the name was read badly.
+        rescued_card_indices: set[int] = set()
+        available_cards = set(unmatched_card_indices)
+        available_visuals = set(unused_visual_indices)
+        while available_cards and available_visuals:
+            candidate_pairs: list[tuple[float, float, float, int, int]] = []
+            for card_index in sorted(available_cards):
+                ranked_visuals = sorted(
+                    (
+                        (
+                            nickname_similarity(
+                                card_players[card_index].get("nickname", ""),
+                                visual_players[visual_index].get("nickname", ""),
+                            ),
+                            visual_index,
+                        )
+                        for visual_index in available_visuals
+                    ),
+                    key=lambda item: item[0],
+                    reverse=True,
+                )
+                if not ranked_visuals:
+                    continue
+                best_score, best_visual_index = ranked_visuals[0]
+                second_card_score = ranked_visuals[1][0] if len(ranked_visuals) > 1 else -1.0
+                ranked_cards = sorted(
+                    (
+                        (
+                            nickname_similarity(
+                                card_players[other_index].get("nickname", ""),
+                                visual_players[best_visual_index].get("nickname", ""),
+                            ),
+                            other_index,
+                        )
+                        for other_index in available_cards
+                    ),
+                    key=lambda item: item[0],
+                    reverse=True,
+                )
+                if not ranked_cards or ranked_cards[0][1] != card_index:
+                    continue
+                second_visual_score = ranked_cards[1][0] if len(ranked_cards) > 1 else -1.0
+                if (
+                    best_score >= 0.60
+                    and best_score - second_card_score >= 0.10
+                    and best_score - second_visual_score >= 0.10
+                ):
+                    candidate_pairs.append(
+                        (
+                            best_score,
+                            best_score - second_card_score,
+                            best_score - second_visual_score,
+                            card_index,
+                            best_visual_index,
+                        )
+                    )
+            if not candidate_pairs:
+                break
+            _, _, _, card_index, visual_index = max(candidate_pairs)
+            resolved_order[card_index] = visual_index
+            rescued_card_indices.add(card_index)
+            available_cards.remove(card_index)
+            available_visuals.remove(visual_index)
+
+        unmatched_card_indices = [
+            index for index in unmatched_card_indices if index in available_cards
+        ]
+        unused_visual_indices = [
+            index for index in unused_visual_indices if index in available_visuals
+        ]
+
+        # Every still-unused visible row means that one remaining unmatched
+        # roster player was shown under a different nickname. Any other
+        # unmatched roster slots were not visible on the screenshot at all.
         wrong_nickname_card_indices: set[int] = set()
         available_cards = set(unmatched_card_indices)
         for visual_index in unused_visual_indices:
@@ -3332,8 +3405,12 @@ def result_from_card_and_visual_audit(
                 # The card itself is authoritative for registration IDs.
                 "id": int(card_player["id"]),
                 "nickname": str(
-                    visual_player.get("nickname")
-                    or card_player.get("nickname", "")
+                    card_player.get("nickname", "")
+                    if card_index in rescued_card_indices
+                    else (
+                        visual_player.get("nickname")
+                        or card_player.get("nickname", "")
+                    )
                 ),
                 # A nickname-mismatch warning must tag the registered Discord
                 # player, whose name differs from the screenshot by definition.
@@ -4291,8 +4368,59 @@ Build a registration result:
         # as part of the nickname. Recover only those placeholders from the
         # screenshot-backed AI result; keep every other card row untouched.
         recovered_placeholders = 0
+        used_visual_candidates: set[tuple[str, int]] = set()
+
+        def recover_placeholder_candidate(
+            card_player: dict,
+            preferred_team_key: str,
+        ) -> Optional[dict]:
+            candidate_sets = [
+                [
+                    (preferred_team_key, index, candidate)
+                    for index, candidate in enumerate(result.get(preferred_team_key, []))
+                    if (preferred_team_key, index) not in used_visual_candidates
+                ],
+                [
+                    (team_key, index, candidate)
+                    for team_key in ("team_a", "team_b")
+                    for index, candidate in enumerate(result.get(team_key, []))
+                    if (team_key, index) not in used_visual_candidates
+                ],
+            ]
+            for pool in candidate_sets:
+                ranked = sorted(
+                    (
+                        (
+                            nickname_similarity(
+                                card_player.get("nickname", ""),
+                                candidate.get("nickname", ""),
+                            ) + (0.02 if team_key == preferred_team_key else 0.0),
+                            team_key,
+                            index,
+                            candidate,
+                        )
+                        for team_key, index, candidate in pool
+                    ),
+                    key=lambda item: item[0],
+                    reverse=True,
+                )
+                if not ranked or ranked[0][0] < 0.60:
+                    continue
+                if len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 0.10:
+                    continue
+                candidate = ranked[0][3]
+                recovered_stats = (
+                    int(candidate.get("kills", -1)),
+                    int(candidate.get("assists", -1)),
+                    int(candidate.get("deaths", -1)),
+                )
+                if recovered_stats == (0, 0, 13) or min(recovered_stats) < 0:
+                    continue
+                used_visual_candidates.add((ranked[0][1], ranked[0][2]))
+                return candidate
+            return None
+
         for team_key in ("team_a", "team_b"):
-            visual_candidates = list(result.get(team_key, []))
             for card_player in card_result.get(team_key, []):
                 card_stats = (
                     int(card_player.get("kills", -1)),
@@ -4301,39 +4429,20 @@ Build a registration result:
                 )
                 if card_stats != (0, 0, 13):
                     continue
-                ranked = sorted(
-                    (
-                        (
-                            nickname_similarity(
-                                card_player.get("nickname", ""),
-                                candidate.get("nickname", ""),
-                            ),
-                            candidate,
-                        )
-                        for candidate in visual_candidates
-                    ),
-                    key=lambda item: item[0],
-                    reverse=True,
-                )
-                if not ranked or ranked[0][0] < 0.72:
+                candidate = recover_placeholder_candidate(card_player, team_key)
+                if candidate is None:
                     continue
-                if len(ranked) > 1 and ranked[1][0] >= ranked[0][0] - 0.08:
-                    continue
-                candidate = ranked[0][1]
                 recovered_stats = (
                     int(candidate.get("kills", -1)),
                     int(candidate.get("assists", -1)),
                     int(candidate.get("deaths", -1)),
                 )
-                if recovered_stats == (0, 0, 13) or min(recovered_stats) < 0:
-                    continue
                 card_player.setdefault(
                     "card_nickname",
                     str(card_player.get("nickname", "")),
                 )
-                card_player["nickname"] = strip_leading_clan_tags(
-                    str(candidate.get("nickname") or card_player.get("nickname", ""))
-                )
+                # Keep the roster nickname authoritative here: this branch fixes
+                # a placeholder, not a verified nickname mismatch.
                 card_player["kills"], card_player["assists"], card_player["deaths"] = recovered_stats
                 card_player.pop("warning_reason", None)
                 recovered_placeholders += 1
@@ -4703,10 +4812,10 @@ async def recover_zeroed_rows(
         if not nickname:
             continue
         board_nickname = str(row.get("nickname") or "").strip()
-        if board_nickname and not nicknames_match(nickname, board_nickname):
+        if board_nickname and nickname_similarity(nickname, board_nickname) < 0.60:
             log.warning(
                 "Повторное чтение 0/0/13: ник карточки %r и ник на табло %r "
-                "не совпали — строка не восстановлена.",
+                "слишком далеки — строка не восстановлена.",
                 nickname,
                 board_nickname,
             )
