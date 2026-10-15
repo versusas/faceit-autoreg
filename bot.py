@@ -5867,6 +5867,11 @@ async def send_zero_stat_warnings(
     prepared_images: Optional[tuple[list[bytes], list[str]]] = None,
 ) -> None:
     """Send only exact auto-warns, and only via `/warn` in admin-commands."""
+    log.info(
+        "Матч #%s: send_zero_stat_warnings запущен, auto_warns_enabled=%s",
+        result.get("match_id"),
+        auto_warns_enabled(),
+    )
     if not auto_warns_enabled():
         log.info(
             "Автоварны отключены настройкой (матч #%s)",
@@ -5883,12 +5888,28 @@ async def send_zero_stat_warnings(
     warning_players: list[tuple[str, int, dict]] = []
     for team_key in ("team_a", "team_b"):
         for player_index, player in enumerate(result.get(team_key, [])):
+            log.info(
+                "Матч #%s: игрок #%s `%s` reason=%r certainty=%r kills=%s assists=%s deaths=%s",
+                result.get("match_id"),
+                player.get("id"),
+                player.get("nickname", ""),
+                player.get("warning_reason"),
+                player.get("warning_certainty"),
+                player.get("kills"),
+                player.get("assists"),
+                player.get("deaths"),
+            )
             if player.get("warning_reason") in {
                 "неправильный ник",
                 "нет на скриншоте",
                 "додж статистики",
             }:
                 warning_players.append((team_key, player_index, player))
+    log.info(
+        "Матч #%s: найдено кандидатов на варн: %s",
+        result.get("match_id"),
+        len(warning_players),
+    )
     if not warning_players:
         return
 
@@ -5955,6 +5976,25 @@ async def send_zero_stat_warnings(
             warning_context_channel,
             admin_command_channel,
         )
+
+        match_id_str = str(result.get("match_id") or "?")
+        diag_lines = [
+            f"🤖 **Автоварны матч #{match_id_str}** — диагностика",
+            f"Кандидатов: {len(warning_players)}",
+            f"Supervisor: {supervisor_tag or 'не найден'}",
+            f"admin-commands канал: <#{getattr(admin_command_channel, 'id', '?')}>",
+        ]
+        for _, _, p in warning_players:
+            diag_lines.append(
+                f"• #{p.get('id')} `{p.get('nickname','')}` — "
+                f"причина: `{p.get('warning_reason','')}` "
+                f"certainty: `{p.get('warning_certainty','нет')}`"
+            )
+        try:
+            await admin_command_channel.send("\n".join(diag_lines)[:2000])
+        except Exception:
+            log.exception("Не удалось отправить диагностику в admin-commands")
+
         log.info(
             "Матч #%s: кандидатов на строгий автоварн %s (%s)",
             result.get("match_id"),
@@ -5992,36 +6032,26 @@ async def send_zero_stat_warnings(
             # ── Certainty gate ──
             is_certain, certainty_reason = player_auto_warn_is_certain(player)
             if not is_certain:
-                # Not sure → don't issue /warn, notify supervisor instead
                 identity_names = player_identity_names(player)
-                player_label = (
-                    f"<@{user_id}>" if user_id is not None
-                    else f"`{identity_names[0] if identity_names else '#' + str(player.get('id'))}`"
-                )
-                uncertain_players.append((
-                    certainty_reason,
-                    player,
-                    user_id,
-                ))
-                log.info(
-                    "Матч #%s: игрок #%s не уверен — %s, тегнем supervisor",
-                    result.get("match_id"),
-                    player.get("id"),
-                    certainty_reason,
-                )
+                uncertain_players.append((certainty_reason, player, user_id))
+                try:
+                    await admin_command_channel.send(
+                        f"⚠️ Матч #{match_id_str}: игрок #{player.get('id')} "
+                        f"`{player.get('nickname','')}` — НЕ уверен: {certainty_reason}"
+                    )
+                except Exception:
+                    pass
                 continue
 
             if user_id is None or member is None:
-                uncertain_players.append((
-                    "Discord-профиль не подтверждён на 100%",
-                    player,
-                    user_id,
-                ))
-                log.info(
-                    "Матч #%s: игрок #%s — Discord-профиль не подтверждён, тегнем supervisor",
-                    result.get("match_id"),
-                    player.get("id"),
-                )
+                uncertain_players.append(("Discord-профиль не найден", player, user_id))
+                try:
+                    await admin_command_channel.send(
+                        f"⚠️ Матч #{match_id_str}: игрок #{player.get('id')} "
+                        f"`{player.get('nickname','')}` — Discord-профиль не найден"
+                    )
+                except Exception:
+                    pass
                 continue
             if user_id in PRO_LEAGUE_USER_IDS:
                 log.info(
