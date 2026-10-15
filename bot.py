@@ -6056,6 +6056,14 @@ async def send_zero_stat_warnings(
             sent_warnings,
             len(warning_players),
         )
+        if sent_warnings > 0:
+            try:
+                await source_message.add_reaction("✅")
+            except Exception:
+                log.warning(
+                    "Не удалось поставить галочку автоварна на карточку матча #%s",
+                    result.get("match_id"),
+                )
     except Exception:
         log.exception(
             "Не удалось обработать строгие автоварны матча #%s",
