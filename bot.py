@@ -5333,6 +5333,21 @@ def warning_league_type(member: object) -> Optional[str]:
     return None
 
 
+def member_has_23_warn_role(member: object) -> bool:
+    """Return True if the player already has 2/3 warns (last warning before ban)."""
+    def role_key(value: object) -> str:
+        text = unicodedata.normalize("NFKD", str(value)).casefold()
+        text = text.translate(_CYRILLIC_TO_LATIN)
+        return "".join(character for character in text if character.isalnum())
+
+    markers = {"23prospectwarn", "23divisionwarn", "23warn"}
+    for role in getattr(member, "roles", None) or []:
+        role_name = role_key(getattr(role, "name", ""))
+        if role_name and any(marker in role_name for marker in markers):
+            return True
+    return False
+
+
 async def query_warning_members(
     source_message: discord.Message,
     warning_channel,
@@ -5913,17 +5928,10 @@ async def send_zero_stat_warnings(
             ),
         )
         sent_warnings = 0
-        for team_key, player_index, player in warning_players:
-            is_certain, certainty_reason = player_auto_warn_is_certain(player)
-            if not is_certain:
-                log.info(
-                    "Матч #%s: игрок #%s пропущен — %s",
-                    result.get("match_id"),
-                    player.get("id"),
-                    certainty_reason,
-                )
-                continue
+        uncertain_players: list[tuple[str, dict, Optional[int]]] = []
 
+        for team_key, player_index, player in warning_players:
+            # ── Resolve Discord identity for every candidate ──
             ordered_ids = roster_discord_ids.get(team_key, [])
             ordered_user_id = (
                 ordered_ids[player_index]
@@ -5943,9 +5951,37 @@ async def send_zero_stat_warnings(
                 ordered_user_id,
                 registration_user_ids.get(player_registration_id),
             )
-            if user_id is None or member is None:
+
+            # ── Certainty gate ──
+            is_certain, certainty_reason = player_auto_warn_is_certain(player)
+            if not is_certain:
+                # Not sure → don't issue /warn, notify supervisor instead
+                identity_names = player_identity_names(player)
+                player_label = (
+                    f"<@{user_id}>" if user_id is not None
+                    else f"`{identity_names[0] if identity_names else '#' + str(player.get('id'))}`"
+                )
+                uncertain_players.append((
+                    certainty_reason,
+                    player,
+                    user_id,
+                ))
                 log.info(
-                    "Матч #%s: игрок #%s пропущен — Discord-профиль не подтверждён на 100%%",
+                    "Матч #%s: игрок #%s не уверен — %s, тегнем supervisor",
+                    result.get("match_id"),
+                    player.get("id"),
+                    certainty_reason,
+                )
+                continue
+
+            if user_id is None or member is None:
+                uncertain_players.append((
+                    "Discord-профиль не подтверждён на 100%",
+                    player,
+                    user_id,
+                ))
+                log.info(
+                    "Матч #%s: игрок #%s — Discord-профиль не подтверждён, тегнем supervisor",
                     result.get("match_id"),
                     player.get("id"),
                 )
@@ -5994,6 +6030,9 @@ async def send_zero_stat_warnings(
             ).rstrip(". ")
             evidence_text = f"{target}\n{reason_text} - #{result['match_id']}"
 
+            # ── Check if this player has the 2/3 role → needs supervisor attention ──
+            needs_supervisor = member_has_23_warn_role(member)
+
             try:
                 await post_warn_command(
                     admin_command_channel,
@@ -6002,11 +6041,13 @@ async def send_zero_stat_warnings(
                     reason_text,
                     int(result["match_id"]),
                 )
-                if supervisor_tag:
+                # Tag supervisor ONLY when player already has 2/3 warns
+                if needs_supervisor and supervisor_tag:
                     await admin_command_channel.send(
                         (
-                            f"{supervisor_tag} нарушение в матче #{result['match_id']}\n"
-                            f"Игрок: {target}\n"
+                            f"⚠️ {supervisor_tag} последний варн перед баном!\n"
+                            f"Матч #{result['match_id']}\n"
+                            f"Игрок: {target} (роль 2/3)\n"
                             f"Причина: {reason_text}"
                         )[:2000]
                     )
@@ -6050,6 +6091,31 @@ async def send_zero_stat_warnings(
                         result.get("match_id"),
                         LOG_CHANNEL_ID,
                     )
+
+        # ── Uncertain players → notify supervisor without /warn ──
+        if uncertain_players and supervisor_tag:
+            try:
+                lines = [
+                    f"🔍 {supervisor_tag} проверьте матч #{result['match_id']}",
+                    "Бот не уверен в следующих варнах:",
+                ]
+                for reason, player, uid in uncertain_players:
+                    identity_names = player_identity_names(player)
+                    player_label = (
+                        f"<@{uid}>" if uid is not None
+                        else f"`{identity_names[0] if identity_names else '#' + str(player.get('id'))}`"
+                    )
+                    warn_reason = WARNING_REASON_LABELS.get(
+                        str(player.get("warning_reason") or ""),
+                        str(player.get("warning_reason") or "неизвестно"),
+                    )
+                    lines.append(f"• {player_label} — {warn_reason} ({reason})")
+                await admin_command_channel.send("\n".join(lines)[:2000])
+            except Exception:
+                log.exception(
+                    "Не удалось отправить уведомление supervisor о неуверенных варнах матча #%s",
+                    result.get("match_id"),
+                )
         log.info(
             "Матч #%s: отправлено строгих автоварнов %s из %s",
             result.get("match_id"),
