@@ -44,6 +44,12 @@ TG_COMMANDS_FILE = os.getenv("TG_COMMANDS_FILE", "./data/tg_commands.json")
 TG_PERMISSIONS_FILE = os.getenv(
     "TG_PERMISSIONS_FILE", "./data/tg_permissions.json"
 )
+WARNING_SETTINGS_FILE = os.getenv(
+    "WARNING_SETTINGS_FILE", "./data/warning_settings.json"
+)
+AUTO_WARN_ENABLED_DEFAULT = os.getenv("AUTO_WARN_ENABLED", "true").lower() in {
+    "1", "true", "yes", "on"
+}
 STATS_TIMEZONE = ZoneInfo(os.getenv("STATS_TIMEZONE", "Europe/Moscow"))
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
@@ -204,6 +210,24 @@ def clear_tg_response(cmd_id: str) -> None:
         del responses[cmd_id]
         data["responses"] = responses
         save_tg_commands(data)
+
+
+def load_warning_settings() -> dict:
+    try:
+        with open(WARNING_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    except Exception:
+        return {}
+
+
+def auto_warns_enabled() -> bool:
+    value = load_warning_settings().get("enabled")
+    if isinstance(value, bool):
+        return value
+    return AUTO_WARN_ENABLED_DEFAULT
 
 
 async def send_command_and_wait(
@@ -805,6 +829,7 @@ async def delete_message(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main_menu_keyboard(user_id: int) -> dict:
+    warn_enabled = auto_warns_enabled()
     buttons = [
         [
             {"text": "▶️ Старт авторег", "callback_data": "cmd:start_all"},
@@ -813,6 +838,12 @@ def main_menu_keyboard(user_id: int) -> dict:
         [
             {"text": "📊 Статистика", "callback_data": "stats:today"},
             {"text": "📡 Статус", "callback_data": "cmd:status"},
+        ],
+        [
+            {
+                "text": f"🛡 Автоварны: {'ВКЛ' if warn_enabled else 'ВЫКЛ'}",
+                "callback_data": "cmd:auto_warn_toggle",
+            },
         ],
         [
             {"text": "📋 Логи матча", "callback_data": "cmd:logs"},
@@ -999,6 +1030,7 @@ async def handle_callback(session: aiohttp.ClientSession, callback: dict) -> Non
                 break
         granted_dc = list_discord_access()
         granted_tg = list_tg_access()
+        warn_state = "включены" if auto_warns_enabled() else "выключены"
         if response:
             clear_tg_response(cmd_id)
             is_active = response.get("is_active", False)
@@ -1009,6 +1041,7 @@ async def handle_callback(session: aiohttp.ClientSession, callback: dict) -> Non
                 f"📡 <b>Состояние</b>\n\n"
                 f"Авторег: {status_emoji} <b>{status_text}</b>\n"
                 f"Каналов: <b>{channels}</b>\n"
+                f"Автоварны: <b>{warn_state}</b>\n"
                 f"Discord-пользователей с правами: <b>{len(granted_dc)}</b>\n"
                 f"TG-пользователей с доступом: <b>{len(granted_tg)}</b>\n"
                 f"Root-админов (env): <b>{len(TELEGRAM_ADMIN_IDS)}</b>"
@@ -1017,10 +1050,26 @@ async def handle_callback(session: aiohttp.ClientSession, callback: dict) -> Non
             text = (
                 f"📡 <b>Состояние</b>\n\n"
                 f"⚠️ Discord-бот не ответил на запрос статуса.\n\n"
+                f"Автоварны: <b>{warn_state}</b>\n"
                 f"Discord-пользователей с правами: <b>{len(granted_dc)}</b>\n"
                 f"TG-пользователей с доступом: <b>{len(granted_tg)}</b>"
             )
         await edit_message(session, chat_id, message_id, text, reply_markup=back_keyboard())
+
+    elif data == "cmd:auto_warn_toggle":
+        target_state = not auto_warns_enabled()
+        await answer_callback(
+            session,
+            cb_id,
+            "⏳ Включаю автоварны..." if target_state else "⏳ Выключаю автоварны...",
+        )
+        await send_command_and_wait(
+            session,
+            chat_id,
+            message_id,
+            "автоварны вкл" if target_state else "автоварны выкл",
+            "Включаю автоварны" if target_state else "Выключаю автоварны",
+        )
 
     # ── Logs ──
     elif data == "cmd:logs":
@@ -1134,6 +1183,7 @@ async def handle_text_input(
     session: aiohttp.ClientSession,
     chat_id: int,
     user_id: int,
+    username: Optional[str],
     text: str,
 ) -> None:
     action = user_pending_action.pop(user_id, None)
@@ -1250,7 +1300,7 @@ async def handle_update(session: aiohttp.ClientSession, update: dict) -> None:
 
     # Pending text input
     if user_id in user_pending_action:
-        await handle_text_input(session, chat_id, user_id, text)
+        await handle_text_input(session, chat_id, user_id, username, text)
         return
 
     # /start → main menu

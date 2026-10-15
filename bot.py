@@ -25,7 +25,7 @@ from PIL import Image
 
 load_dotenv()
 
-BOT_VERSION = "v80-data-path-permissions-fix-2026-10-10"
+BOT_VERSION = "v81-strict-auto-warns-admin-commands-2026-10-15"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
@@ -285,6 +285,16 @@ NORMAL_CHANNEL_IDS = parse_channel_ids("NORMAL_CHANNEL_IDS")
 PRIORITY_CHANNEL_IDS = parse_channel_ids("PRIORITY_CHANNEL_IDS")
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
 WARN_CHANNEL_ID = int(os.getenv("WARN_CHANNEL_ID", "0"))
+WARN_COMMAND_CHANNEL_ID = int(os.getenv("WARN_COMMAND_CHANNEL_ID", "0"))
+WARNING_SETTINGS_FILE = os.getenv(
+    "WARNING_SETTINGS_FILE",
+    "./data/warning_settings.json",
+)
+AUTO_WARN_ENABLED_DEFAULT = os.getenv("AUTO_WARN_ENABLED", "true").lower() in {
+    "1", "true", "yes", "on"
+}
+WARN_SUPERVISOR_QUERY = os.getenv("WARN_SUPERVISOR_QUERY", "versus2739").strip()
+WARN_SUPERVISOR_ID = int(os.getenv("WARN_SUPERVISOR_ID", "0"))
 PRO_LEAGUE_USER_IDS: set[int] = {
     # Вставляйте Discord user ID игроков Про Лиги сюда, по одному на строку:
     # 111111111111111111,
@@ -303,6 +313,11 @@ WARNING_ELIGIBLE_ROLE_FRAGMENTS = {
     "проспект",
     "division",
     "дивизион",
+}
+WARNING_BLOCKED_ROLE_FRAGMENTS = {
+    "23prospectwarn",
+    "fplcurator",
+    "divisioncurator",
 }
 MY_ACCOUNT_ID = int(os.getenv("MY_ACCOUNT_ID", "0"))
 COMMAND_PERMISSIONS_FILE = os.getenv(
@@ -503,6 +518,48 @@ def save_tg_commands_data(data: dict) -> None:
     os.replace(tmp, TG_COMMANDS_FILE)
 
 
+def load_warning_settings_data() -> dict:
+    try:
+        with open(WARNING_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        log.exception(
+            "Ошибка чтения файла настроек автоварнов %s",
+            WARNING_SETTINGS_FILE,
+        )
+        return {}
+
+
+def save_warning_settings_data(data: dict) -> None:
+    directory = os.path.dirname(WARNING_SETTINGS_FILE)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp = f"{WARNING_SETTINGS_FILE}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, WARNING_SETTINGS_FILE)
+
+
+def auto_warns_enabled() -> bool:
+    data = load_warning_settings_data()
+    value = data.get("enabled")
+    if isinstance(value, bool):
+        return value
+    return AUTO_WARN_ENABLED_DEFAULT
+
+
+def set_auto_warns_enabled(enabled: bool) -> bool:
+    previous = auto_warns_enabled()
+    data = load_warning_settings_data()
+    data["enabled"] = bool(enabled)
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    save_warning_settings_data(data)
+    return previous != bool(enabled)
+
+
 def tg_mode_selection(mode_part: str) -> tuple[str, set[int]]:
     modes = {
         "обычный": ("обычный", NORMAL_CHANNEL_IDS),
@@ -589,10 +646,32 @@ async def process_tg_commands() -> None:
                         log.warning("ТГ: нет каналов для режима %r", mode_part)
                 elif cmd == "статус":
                     channels = len(active_channel_ids)
+                    warn_state = "включены" if auto_warns_enabled() else "выключены"
                     response_text = (
                         f"{'🟢' if is_active else '🔴'} "
                         f"Авторег: {'активен' if is_active else 'остановлен'}, "
-                        f"каналов: {channels}"
+                        f"каналов: {channels}, автоварны: {warn_state}"
+                    )
+                elif cmd in {"автоварны вкл", "варны вкл", "autowarn on"}:
+                    changed = set_auto_warns_enabled(True)
+                    response_text = (
+                        "🛡 Автоварны включены"
+                        + ("" if changed else " (уже были включены)")
+                    )
+                elif cmd in {"автоварны выкл", "варны выкл", "autowarn off"}:
+                    changed = set_auto_warns_enabled(False)
+                    response_text = (
+                        "🛡 Автоварны выключены"
+                        + ("" if changed else " (уже были выключены)")
+                    )
+                elif cmd in {"автоварны статус", "варны статус", "autowarn status"}:
+                    response_text = (
+                        "🛡 Автоварны: "
+                        f"{'включены' if auto_warns_enabled() else 'выключены'}\n"
+                        f"/warn-канал: "
+                        f"{WARN_COMMAND_CHANNEL_ID if WARN_COMMAND_CHANNEL_ID else 'auto: admin-commands'}\n"
+                        f"Канал доказательств: "
+                        f"{WARN_CHANNEL_ID if WARN_CHANNEL_ID else 'не задан'}"
                     )
                 else:
                     response_text = f"❓ Неизвестная команда: {cmd}"
@@ -3396,11 +3475,14 @@ def result_from_card_and_visual_audit(
             assists = int(visual_player["assists"])
             deaths = int(visual_player["deaths"])
             warning_reason: Optional[str] = None
+            warning_certainty: Optional[str] = None
             if kills == 0 and assists == 0 and deaths == 0:
                 deaths = 13
                 warning_reason = "додж статистики"
+                warning_certainty = "exact_zero_row"
             elif card_index in forced_wrong_nickname_indices:
                 warning_reason = "неправильный ник"
+                warning_certainty = "full_scoreboard_wrong_nickname"
             merged_player = {
                 # The card itself is authoritative for registration IDs.
                 "id": int(card_player["id"]),
@@ -3421,6 +3503,8 @@ def result_from_card_and_visual_audit(
             }
             if warning_reason is not None:
                 merged_player["warning_reason"] = warning_reason
+            if warning_certainty is not None:
+                merged_player["warning_certainty"] = warning_certainty
             merged.append(merged_player)
         return merged
 
@@ -4353,6 +4437,7 @@ Build a registration result:
             ):
                 player["deaths"] = 13
                 player["warning_reason"] = "додж статистики"
+                player["warning_certainty"] = "exact_zero_row"
     explicit_ct_team = explicit_ct_team_from_card(message_text)
     if explicit_ct_team in ("A", "B"):
         result["ct_team"] = explicit_ct_team
@@ -5217,6 +5302,37 @@ def member_has_warning_eligible_league_role(member: object) -> bool:
     return False
 
 
+def member_has_warning_blocking_role(member: object) -> bool:
+    """Roles that must never receive automatic warnings."""
+    def role_key(value: object) -> str:
+        text = unicodedata.normalize("NFKD", str(value)).casefold()
+        text = text.translate(_CYRILLIC_TO_LATIN)
+        return "".join(character for character in text if character.isalnum())
+
+    blocked = {
+        role_key(fragment)
+        for fragment in WARNING_BLOCKED_ROLE_FRAGMENTS
+    }
+    for role in getattr(member, "roles", None) or []:
+        role_name = role_key(getattr(role, "name", ""))
+        if role_name and any(fragment in role_name for fragment in blocked):
+            return True
+    return False
+
+
+def warning_league_type(member: object) -> Optional[str]:
+    """Resolve the `/warn тип ...` argument from the member's league roles."""
+    names = [
+        normalize_nickname(getattr(role, "name", ""))
+        for role in getattr(member, "roles", None) or []
+    ]
+    if any("division" in name or "дивизион" in name for name in names):
+        return "Division League"
+    if any("prospect" in name or "проспект" in name for name in names):
+        return "Prospect League"
+    return None
+
+
 async def query_warning_members(
     source_message: discord.Message,
     warning_channel,
@@ -5452,6 +5568,150 @@ async def resolve_warning_identity(
     return None, None
 
 
+def player_auto_warn_is_certain(player: dict) -> tuple[bool, str]:
+    """Allow only exact, non-ambiguous violations into auto-warn flow."""
+    reason = str(player.get("warning_reason") or "")
+    certainty = str(player.get("warning_certainty") or "")
+    try:
+        stats = tuple(
+            int(player.get(key, -1))
+            for key in ("kills", "assists", "deaths")
+        )
+    except (TypeError, ValueError):
+        return False, "невалидная статистика"
+
+    if reason == "додж статистики":
+        if certainty != "exact_zero_row" or stats != (0, 0, 13):
+            return False, "0/0/13 не подтверждены точной строкой табло"
+        return True, ""
+
+    if reason == "неправильный ник":
+        if certainty != "full_scoreboard_wrong_nickname":
+            return False, "несоответствие ника не доказано полным табло"
+        if stats == (0, 0, 13):
+            return False, "несоответствие ника ушло в synthetic 0/0/13"
+        card_nickname = str(player.get("card_nickname") or "").strip()
+        board_nickname = str(player.get("nickname") or "").strip()
+        if not card_nickname or not board_nickname:
+            return False, "нет пары никнеймов для сравнения"
+        if nickname_similarity(card_nickname, board_nickname) >= 0.60:
+            return False, "разница никнеймов недостаточно явная"
+        return True, ""
+
+    return False, "причина не относится к 100% автоворну"
+
+
+async def resolve_warn_command_channel(
+    source_message: discord.Message,
+    warning_channel,
+):
+    """Find the channel where `/warn ...` must be posted."""
+    if WARN_COMMAND_CHANNEL_ID:
+        channel = client.get_channel(WARN_COMMAND_CHANNEL_ID)
+        if channel is None:
+            with contextlib.suppress(Exception):
+                channel = await client.fetch_channel(WARN_COMMAND_CHANNEL_ID)
+        if channel is not None:
+            return channel
+
+    exact_names = {"admin-commands", "admin_commands", "admin commands"}
+    candidate_channels: list[object] = []
+    guilds: list[object] = []
+    for guild in (
+        getattr(source_message, "guild", None),
+        getattr(warning_channel, "guild", None) if warning_channel is not None else None,
+    ):
+        if guild is not None and guild not in guilds:
+            guilds.append(guild)
+
+    for guild in guilds:
+        text_channels = list(getattr(guild, "text_channels", None) or [])
+        for channel in text_channels:
+            name = str(getattr(channel, "name", "") or "").casefold()
+            if name in exact_names:
+                return channel
+            if "admin" in name and "command" in name:
+                candidate_channels.append(channel)
+    if len(candidate_channels) == 1:
+        return candidate_channels[0]
+    return None
+
+
+async def resolve_warning_supervisor_tag(
+    source_message: discord.Message,
+    warning_channel,
+    admin_channel,
+) -> Optional[str]:
+    """Resolve the moderator who must be pinged alongside an auto-warn."""
+    if WARN_SUPERVISOR_ID > 0:
+        member = await warning_member(
+            WARN_SUPERVISOR_ID,
+            source_message,
+            warning_channel or admin_channel,
+        )
+        if member is not None:
+            return f"<@{WARN_SUPERVISOR_ID}>"
+
+    query = WARN_SUPERVISOR_QUERY.strip()
+    if not query:
+        return None
+    normalized_query = normalize_nickname(query)
+    found_ids: set[int] = set()
+    guilds: list[object] = []
+    for guild in (
+        getattr(source_message, "guild", None),
+        getattr(warning_channel, "guild", None) if warning_channel is not None else None,
+        getattr(admin_channel, "guild", None) if admin_channel is not None else None,
+    ):
+        if guild is not None and guild not in guilds:
+            guilds.append(guild)
+
+    for guild in guilds:
+        for member in getattr(guild, "members", None) or []:
+            member_id = getattr(member, "id", None)
+            if not isinstance(member_id, int):
+                continue
+            names = {
+                str(getattr(member, "display_name", "") or ""),
+                str(getattr(member, "global_name", "") or ""),
+                str(getattr(member, "name", "") or ""),
+            }
+            if any(normalize_nickname(name) == normalized_query for name in names if name):
+                found_ids.add(member_id)
+        query_members = getattr(guild, "query_members", None)
+        if callable(query_members):
+            with contextlib.suppress(Exception):
+                members = await query_members(query=query, limit=25, cache=True)
+                for member in members or []:
+                    member_id = getattr(member, "id", None)
+                    if not isinstance(member_id, int):
+                        continue
+                    names = {
+                        str(getattr(member, "display_name", "") or ""),
+                        str(getattr(member, "global_name", "") or ""),
+                        str(getattr(member, "name", "") or ""),
+                    }
+                    if any(normalize_nickname(name) == normalized_query for name in names if name):
+                        found_ids.add(member_id)
+    if len(found_ids) == 1:
+        return f"<@{next(iter(found_ids))}>"
+    return None
+
+
+async def post_warn_command(
+    channel,
+    user_id: int,
+    league_type: str,
+    reason_text: str,
+    match_id: int,
+) -> None:
+    command = (
+        f"/warn игрок <@{user_id}> тип {league_type} "
+        f"причина {reason_text} - #{match_id}"
+    )
+    await channel.send(command[:2000])
+
+
 async def send_warning_with_screenshot(
     channel,
     warning_text: str,
@@ -5533,7 +5793,7 @@ async def download_warning_images(
         player.get("warning_reason") in WARNING_REASON_LABELS
         for player in [*result.get("team_a", []), *result.get("team_b", [])]
     )
-    if not source_urls or not WARN_CHANNEL_ID or not has_warnings:
+    if not source_urls or not has_warnings:
         return source_images, source_urls
     try:
         timeout = aiohttp.ClientTimeout(total=30)
@@ -5560,10 +5820,10 @@ async def send_zero_stat_warnings(
     source_message: discord.Message,
     prepared_images: Optional[tuple[list[bytes], list[str]]] = None,
 ) -> None:
-    """Warn tagged non-Pro-League players who received an unmatched 0/0/13."""
-    if not WARN_CHANNEL_ID:
-        log.warning(
-            "Автоварны отключены: WARN_CHANNEL_ID не указан (матч #%s)",
+    """Send only exact auto-warns, and only via `/warn` in admin-commands."""
+    if not auto_warns_enabled():
+        log.info(
+            "Автоварны отключены настройкой (матч #%s)",
             result.get("match_id"),
         )
         return
@@ -5581,32 +5841,53 @@ async def send_zero_stat_warnings(
         return
 
     try:
-        warning_channel = client.get_channel(WARN_CHANNEL_ID)
-        if warning_channel is None:
-            warning_channel = await client.fetch_channel(WARN_CHANNEL_ID)
+        warning_channel = None
+        if WARN_CHANNEL_ID:
+            warning_channel = client.get_channel(WARN_CHANNEL_ID)
+            if warning_channel is None:
+                with contextlib.suppress(Exception):
+                    warning_channel = await client.fetch_channel(WARN_CHANNEL_ID)
+
+        admin_command_channel = await resolve_warn_command_channel(
+            source_message,
+            warning_channel,
+        )
+        if admin_command_channel is None:
+            log.warning(
+                "Матч #%s: admin-commands не найден, автоварны пропущены",
+                result.get("match_id"),
+            )
+            return
 
         warning_log_channel = None
-        if LOG_CHANNEL_ID and LOG_CHANNEL_ID != WARN_CHANNEL_ID:
+        if LOG_CHANNEL_ID:
             try:
                 warning_log_channel = client.get_channel(LOG_CHANNEL_ID)
                 if warning_log_channel is None:
                     warning_log_channel = await client.fetch_channel(LOG_CHANNEL_ID)
+                if (
+                    warning_channel is not None
+                    and getattr(warning_log_channel, "id", None)
+                    == getattr(warning_channel, "id", None)
+                ):
+                    warning_log_channel = None
             except Exception:
                 log.exception(
                     "Не удалось открыть лог-канал %s для записи автоварнов",
                     LOG_CHANNEL_ID,
                 )
 
-        if prepared_images is None:
+        if prepared_images is None and (warning_channel is not None or warning_log_channel is not None):
             prepared_images = await download_warning_images(
                 result,
                 source_message,
             )
-        source_images, source_urls = prepared_images
+        source_images, source_urls = prepared_images or ([], [])
 
+        warning_context_channel = warning_channel or admin_command_channel
         identity_candidates = warning_identity_candidates(
             source_message,
-            warning_channel,
+            warning_context_channel,
         )
         mention_names = await mention_display_names(
             plain_message_text(source_message),
@@ -5617,8 +5898,13 @@ async def send_zero_stat_warnings(
             source_message,
             mention_names,
         )
+        supervisor_tag = await resolve_warning_supervisor_tag(
+            source_message,
+            warning_context_channel,
+            admin_command_channel,
+        )
         log.info(
-            "Матч #%s: кандидатов на варн %s (%s)",
+            "Матч #%s: кандидатов на строгий автоварн %s (%s)",
             result.get("match_id"),
             len(warning_players),
             ", ".join(
@@ -5628,6 +5914,16 @@ async def send_zero_stat_warnings(
         )
         sent_warnings = 0
         for team_key, player_index, player in warning_players:
+            is_certain, certainty_reason = player_auto_warn_is_certain(player)
+            if not is_certain:
+                log.info(
+                    "Матч #%s: игрок #%s пропущен — %s",
+                    result.get("match_id"),
+                    player.get("id"),
+                    certainty_reason,
+                )
+                continue
+
             ordered_ids = roster_discord_ids.get(team_key, [])
             ordered_user_id = (
                 ordered_ids[player_index]
@@ -5638,82 +5934,112 @@ async def send_zero_stat_warnings(
             if ordered_user_id is not None and registration_id_from_display_name(
                 mention_names.get(ordered_user_id, "")
             ) not in (None, player_registration_id):
-                # The mention at this position belongs to another roster ID.
                 ordered_user_id = None
             user_id, member = await resolve_warning_identity(
                 source_message,
                 player,
-                warning_channel,
+                warning_context_channel,
                 identity_candidates,
                 ordered_user_id,
                 registration_user_ids.get(player_registration_id),
             )
-            if user_id is not None and user_id in PRO_LEAGUE_USER_IDS:
+            if user_id is None or member is None:
+                log.info(
+                    "Матч #%s: игрок #%s пропущен — Discord-профиль не подтверждён на 100%%",
+                    result.get("match_id"),
+                    player.get("id"),
+                )
+                continue
+            if user_id in PRO_LEAGUE_USER_IDS:
                 log.info(
                     "Варн матча #%s пропущен для Pro League пользователя %s",
                     result.get("match_id"),
                     user_id,
                 )
                 continue
-
-            if member is not None and member_has_pro_league_role(member):
+            if member_has_pro_league_role(member):
                 log.info(
                     "Варн матча #%s пропущен: у %s есть роль Pro League",
                     result.get("match_id"),
                     user_id,
                 )
                 continue
-
-            if member is not None and not member_has_warning_eligible_league_role(member):
+            if member_has_warning_blocking_role(member):
+                log.info(
+                    "Варн матча #%s пропущен: у %s есть исключающая роль",
+                    result.get("match_id"),
+                    user_id,
+                )
+                continue
+            if not member_has_warning_eligible_league_role(member):
                 log.info(
                     "Варн матча #%s пропущен для %s: нет роли Prospect/Division",
                     result.get("match_id"),
                     user_id,
                 )
                 continue
-
-            identity_names = player_identity_names(player)
-            if user_id is None:
-                log.warning(
-                    "Матч #%s: Discord-профиль игрока #%s (%s) не найден, "
-                    "варн будет без тега",
+            league_type = warning_league_type(member)
+            if league_type is None:
+                log.info(
+                    "Матч #%s: игрок #%s пропущен — не удалось определить тип лиги",
                     result.get("match_id"),
-                    player.get("id"),
-                    " / ".join(identity_names) or "без ника",
+                    user_id,
                 )
-            target = (
-                f"<@{user_id}>"
-                if user_id is not None
-                else f"`{identity_names[0] if identity_names else 'ник не найден'}`"
-            )
+                continue
+
+            target = f"<@{user_id}>"
             reason_text = WARNING_REASON_LABELS.get(
                 player["warning_reason"],
                 "Обнуление игровой статистики",
-            )
-            warning_text = f"{target}\n{reason_text} - #{result['match_id']}"
+            ).rstrip(". ")
+            evidence_text = f"{target}\n{reason_text} - #{result['match_id']}"
 
             try:
-                await send_warning_with_screenshot(
-                    warning_channel,
-                    warning_text,
+                await post_warn_command(
+                    admin_command_channel,
+                    user_id,
+                    league_type,
+                    reason_text,
                     int(result["match_id"]),
-                    source_images,
-                    source_urls,
                 )
+                if supervisor_tag:
+                    await admin_command_channel.send(
+                        (
+                            f"{supervisor_tag} нарушение в матче #{result['match_id']}\n"
+                            f"Игрок: {target}\n"
+                            f"Причина: {reason_text}"
+                        )[:2000]
+                    )
             except Exception:
-                # One failed warning must never cancel the remaining players.
                 log.exception(
-                    "Не удалось отправить автоварн матча #%s игроку #%s",
+                    "Не удалось отправить /warn матча #%s игроку #%s в канал %s",
                     result.get("match_id"),
-                    player.get("id"),
+                    user_id,
+                    getattr(admin_command_channel, "id", "?"),
                 )
                 continue
+
+            if warning_channel is not None:
+                try:
+                    await send_warning_with_screenshot(
+                        warning_channel,
+                        evidence_text,
+                        int(result["match_id"]),
+                        source_images,
+                        source_urls,
+                    )
+                except Exception:
+                    log.exception(
+                        "Не удалось отправить доказательство автоварна матча #%s игроку #%s",
+                        result.get("match_id"),
+                        user_id,
+                    )
             sent_warnings += 1
             if warning_log_channel is not None:
                 try:
                     await send_warning_with_screenshot(
                         warning_log_channel,
-                        warning_text,
+                        evidence_text,
                         int(result["match_id"]),
                         source_images,
                         source_urls,
@@ -5725,16 +6051,15 @@ async def send_zero_stat_warnings(
                         LOG_CHANNEL_ID,
                     )
         log.info(
-            "Матч #%s: отправлено варнов %s из %s",
+            "Матч #%s: отправлено строгих автоварнов %s из %s",
             result.get("match_id"),
             sent_warnings,
             len(warning_players),
         )
     except Exception:
         log.exception(
-            "Не удалось отправить автоварн матча #%s в канал %s",
+            "Не удалось обработать строгие автоварны матча #%s",
             result.get("match_id"),
-            WARN_CHANNEL_ID,
         )
 
 
@@ -7520,7 +7845,12 @@ async def on_message(message: discord.Message) -> None:
             "registrations_today": counts["today"],
             "registrations_hour": counts["hour"],
             "warning_status": (
-                f"канал {WARN_CHANNEL_ID}" if WARN_CHANNEL_ID else "не настроены"
+                (
+                    f"{'включены' if auto_warns_enabled() else 'выключены'}; "
+                    f"/warn → "
+                    f"{WARN_COMMAND_CHANNEL_ID if WARN_COMMAND_CHANNEL_ID else 'auto admin-commands'}; "
+                    f"доказательства → {WARN_CHANNEL_ID if WARN_CHANNEL_ID else 'не задан'}"
+                )
             ),
             "pro_exemptions": len(PRO_LEAGUE_USER_IDS),
             "api_style": AI_API_STYLE,
@@ -7550,7 +7880,9 @@ async def on_message(message: discord.Message) -> None:
             f"Авторег: **{active_text}** · обрабатывается игр: **{len(processing_match_ids)}**\n"
             f"Регистраций: всего **{counts['total']}**, сегодня **{counts['today']}**\n"
             f"Моделей: **{len(GEMINI_MODELS)}** · API-ключи: {ai_keys_summary()}\n"
-            f"Автоварны: **{'включены' if WARN_CHANNEL_ID else 'не настроены'}** · "
+            f"Автоварны: **{'включены' if auto_warns_enabled() else 'выключены'}** · "
+            f"/warn → **{WARN_COMMAND_CHANNEL_ID if WARN_COMMAND_CHANNEL_ID else 'auto admin-commands'}** · "
+            f"доказательства → **{WARN_CHANNEL_ID if WARN_CHANNEL_ID else 'не задан'}**\n"
             f"Pro League ID: **{len(PRO_LEAGUE_USER_IDS)}**\n"
             f"Права на `старт`/`енд`: у владельца и ещё у **{len(granted_start_end)}** пользователей.\n"
             "Всем доступна только `стата`. Подробный HTML-отчёт прикреплён.", 
