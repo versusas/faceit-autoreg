@@ -3365,7 +3365,13 @@ def result_from_card_and_visual_audit(
                 best_visual_order,
             ):
                 resolved_order[card_index] = visual_index
-                forced_wrong_nickname_indices.add(card_index)
+                # Only mark as "wrong nickname" if the names genuinely differ.
+                # Case differences like zerokay/Zerokay are NOT a mismatch.
+                if nickname_similarity(
+                    card_players[card_index].get("nickname", ""),
+                    visual_players[visual_index].get("nickname", ""),
+                ) < 0.90:
+                    forced_wrong_nickname_indices.add(card_index)
             unmatched_card_indices = []
             unused_visual_indices = []
 
