@@ -182,6 +182,9 @@ def strip_leading_clan_tags(value: str) -> str:
     text = str(value).strip()
     # Remove leading symbols that are likely not part of the name
     text = re.sub(r"^[!?.@#$%\^&*()_+\-=\[\]{}|;':\",./<>?~]+", "", text).strip()
+    # Some renderers lose only the opening bracket of a clan tag and leave
+    # `VP] Nick` / `efpl] Nick`. Treat this as the same prefix and drop it.
+    text = re.sub(r"^\s*[A-Za-zА-Яа-яЁё0-9]{1,16}\]\s*(?=\S)", "", text)
     
     previous = None
     while previous != text:
@@ -192,6 +195,15 @@ def strip_leading_clan_tags(value: str) -> str:
         text = re.sub(
             r"^\s*[^\w\[({]*[\[({]?\s*OLD\s*[\])}]?"
             r"(?=\s|[|:·•\-–—])\s*(?:[|:·•\-–—]+\s*)?",
+            "",
+            text,
+            flags=re.I,
+        )
+        # Some scoreboards prepend a service marker before the real nickname,
+        # for example `код - LUNA` / `code - LUNA`. It is never part of the
+        # player's nickname and must be ignored for matching.
+        text = re.sub(
+            r"^\s*(?:код|code)\s*[|:·•\-–—]+\s*(?=\S)",
             "",
             text,
             flags=re.I,
@@ -3641,6 +3653,8 @@ def result_from_review_card_and_modal(
                 int(helper_player.get("assists", 0) or 0),
                 int(helper_player.get("deaths", 0) or 0),
             )
+            warning_reason: Optional[str] = None
+            warning_certainty: Optional[str] = None
             # Non-zero statistics from «Получить игроков» are already known
             # and must not be read again from the screenshot.
             if helper_raw != (0, 0, 0):
@@ -3650,12 +3664,8 @@ def result_from_review_card_and_modal(
                 # on the final scoreboard (tags such as CLION/OLD are ignored).
                 recovered = visual_stats_for_nickname(str(player.get("nickname", "")))
                 card_stats = kad(player)
-                warning_reason: Optional[str] = None
-                warning_certainty: Optional[str] = None
                 if recovered is not None and recovered != (0, 0, 13):
                     kills, assists, deaths = recovered
-                    # If recovered from visual, it means current card was 0/0/0.
-                    # This is NOT a warning path, but we keep track.
                 elif card_stats != (0, 0, 13):
                     kills, assists, deaths = card_stats
                 else:
