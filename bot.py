@@ -6134,11 +6134,21 @@ async def send_zero_stat_warnings(
                         user_id,
                     )
             sent_warnings += 1
+
+            # ── Log issued warn to LOG_CHANNEL ──
+            log_text = (
+                f"✅ **Автоварн выдан** — матч #{result['match_id']}\n"
+                f"Игрок: {target} (#{player.get('id')})\n"
+                f"Причина: {reason_text}\n"
+                f"Лига: {league_type}"
+            )
+            if needs_supervisor:
+                log_text += "\n⚠️ Роль 2/3 — последний варн перед баном!"
             if warning_log_channel is not None:
                 try:
                     await send_warning_with_screenshot(
                         warning_log_channel,
-                        evidence_text,
+                        log_text,
                         int(result["match_id"]),
                         source_images,
                         source_urls,
@@ -6149,31 +6159,37 @@ async def send_zero_stat_warnings(
                         result.get("match_id"),
                         LOG_CHANNEL_ID,
                     )
+            elif LOG_CHANNEL_ID:
+                await notify_log_channel(log_text)
 
         # ── Uncertain players → notify supervisor without /warn ──
-        if uncertain_players and supervisor_tag:
+        if uncertain_players:
+            uncertain_lines = [
+                f"🔍 **Матч #{result['match_id']}** — бот не уверен, варн НЕ выдан:",
+            ]
+            for reason, player, uid in uncertain_players:
+                identity_names = player_identity_names(player)
+                player_label = (
+                    f"<@{uid}>" if uid is not None
+                    else f"`{identity_names[0] if identity_names else '#' + str(player.get('id'))}`"
+                )
+                warn_reason = WARNING_REASON_LABELS.get(
+                    str(player.get("warning_reason") or ""),
+                    str(player.get("warning_reason") or "неизвестно"),
+                )
+                uncertain_lines.append(f"• {player_label} — {warn_reason} ({reason})")
+            uncertain_text = "\n".join(uncertain_lines)
+            if supervisor_tag:
+                uncertain_text = f"{supervisor_tag}\n{uncertain_text}"
             try:
-                lines = [
-                    f"🔍 {supervisor_tag} проверьте матч #{result['match_id']}",
-                    "Бот не уверен в следующих варнах:",
-                ]
-                for reason, player, uid in uncertain_players:
-                    identity_names = player_identity_names(player)
-                    player_label = (
-                        f"<@{uid}>" if uid is not None
-                        else f"`{identity_names[0] if identity_names else '#' + str(player.get('id'))}`"
-                    )
-                    warn_reason = WARNING_REASON_LABELS.get(
-                        str(player.get("warning_reason") or ""),
-                        str(player.get("warning_reason") or "неизвестно"),
-                    )
-                    lines.append(f"• {player_label} — {warn_reason} ({reason})")
-                await admin_command_channel.send("\n".join(lines)[:2000])
+                await admin_command_channel.send(uncertain_text[:2000])
             except Exception:
                 log.exception(
                     "Не удалось отправить уведомление supervisor о неуверенных варнах матча #%s",
                     result.get("match_id"),
                 )
+            # Also log uncertain to LOG_CHANNEL
+            await notify_log_channel(uncertain_text[:2000])
         log.info(
             "Матч #%s: отправлено строгих автоварнов %s из %s",
             result.get("match_id"),
