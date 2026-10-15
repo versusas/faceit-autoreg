@@ -5797,6 +5797,21 @@ async def notify_log_channel(text: str) -> None:
         )
 
 
+async def source_message_has_any_reaction(message: discord.Message) -> bool:
+    """Old/handled cards with any reaction must never issue auto-warns again."""
+    reactions = getattr(message, "reactions", None) or []
+    if any(int(getattr(reaction, "count", 0) or 0) > 0 for reaction in reactions):
+        return True
+    fetch_message = getattr(getattr(message, "channel", None), "fetch_message", None)
+    if callable(fetch_message):
+        with contextlib.suppress(Exception):
+            fresh = await fetch_message(int(message.id))
+            reactions = getattr(fresh, "reactions", None) or []
+            if any(int(getattr(reaction, "count", 0) or 0) > 0 for reaction in reactions):
+                return True
+    return False
+
+
 async def download_warning_images(
     result: dict,
     source_message: discord.Message,
@@ -5839,6 +5854,12 @@ async def send_zero_stat_warnings(
     if not auto_warns_enabled():
         log.info(
             "Автоварны отключены настройкой (матч #%s)",
+            result.get("match_id"),
+        )
+        return
+    if await source_message_has_any_reaction(source_message):
+        log.info(
+            "Матч #%s: на карточке уже есть реакция, повторный автоварн пропущен",
             result.get("match_id"),
         )
         return
@@ -7397,10 +7418,16 @@ async def process_upload(message: discord.Message, test_only: bool = False) -> N
             # Discord member lookups for warnings can take a long time. Take
             # the screenshot now and send warnings in the background, so the
             # confirmed card is cleaned up right away instead of after them.
-            warning_images = await download_warning_images(result, message)
-            run_in_background(
-                send_zero_stat_warnings(result, message, warning_images)
-            )
+            if await source_message_has_any_reaction(message):
+                log.info(
+                    "Матч #%s: карточка уже с реакцией, фоновые автоварны не запускаются",
+                    result.get("match_id"),
+                )
+            else:
+                warning_images = await download_warning_images(result, message)
+                run_in_background(
+                    send_zero_stat_warnings(result, message, warning_images)
+                )
             if DELETE_AFTER_REGISTRATION:
                 await asyncio.sleep(DELETE_DELAY)
                 try:
