@@ -3650,13 +3650,24 @@ def result_from_review_card_and_modal(
                 # on the final scoreboard (tags such as CLION/OLD are ignored).
                 recovered = visual_stats_for_nickname(str(player.get("nickname", "")))
                 card_stats = kad(player)
+                warning_reason: Optional[str] = None
+                warning_certainty: Optional[str] = None
                 if recovered is not None and recovered != (0, 0, 13):
                     kills, assists, deaths = recovered
+                    # If recovered from visual, it means current card was 0/0/0.
+                    # This is NOT a warning path, but we keep track.
                 elif card_stats != (0, 0, 13):
                     kills, assists, deaths = card_stats
                 else:
                     kills, assists, deaths = (0, 0, 13)
-            output.append({"id": int(pid), "nickname": player.get("nickname", ""), "kills": kills, "assists": assists, "deaths": deaths, "confidence": 1.0})
+                    warning_reason = "додж статистики"
+                    warning_certainty = "exact_zero_row"
+            p_data = {"id": int(pid), "nickname": player.get("nickname", ""), "kills": kills, "assists": assists, "deaths": deaths, "confidence": 1.0}
+            if warning_reason:
+                p_data["warning_reason"] = warning_reason
+            if warning_certainty:
+                p_data["warning_certainty"] = warning_certainty
+            output.append(p_data)
         return output
 
     team_a = assign(slots["team_a"], modal[side_a])
@@ -3767,20 +3778,21 @@ def parse_complete_card(message_text: str) -> Optional[dict]:
         team: list[dict] = []
         for found in player_pattern.finditer(section):
             kills, assists, deaths = map(int, found.group(3, 4, 5))
+            p_data = {
+                "id": int(found.group(1)),
+                "nickname": strip_leading_clan_tags(
+                    found.group(2).strip(" `*_.,")
+                ),
+                "kills": kills,
+                "assists": assists,
+                "deaths": deaths,
+                "confidence": 0.99,
+            }
             if kills == 0 and assists == 0 and deaths == 0:
-                deaths = 13
-            team.append(
-                {
-                    "id": int(found.group(1)),
-                    "nickname": strip_leading_clan_tags(
-                        found.group(2).strip(" `*_.,")
-                    ),
-                    "kills": kills,
-                    "assists": assists,
-                    "deaths": deaths,
-                    "confidence": 0.99,
-                }
-            )
+                p_data["deaths"] = 13
+                p_data["warning_reason"] = "додж статистики"
+                p_data["warning_certainty"] = "exact_zero_row"
+            team.append(p_data)
             if len(team) == 5:
                 break
         return team
@@ -5340,10 +5352,14 @@ def member_has_23_warn_role(member: object) -> bool:
         text = text.translate(_CYRILLIC_TO_LATIN)
         return "".join(character for character in text if character.isalnum())
 
-    markers = {"23prospectwarn", "23divisionwarn", "23warn"}
+    markers = {"23prospectwarn", "23divisionwarn", "23warn", "23"}
     for role in getattr(member, "roles", None) or []:
-        role_name = role_key(getattr(role, "name", ""))
-        if role_name and any(marker in role_name for marker in markers):
+        name_raw = str(getattr(role, "name", "")).lower()
+        role_name_clean = role_key(name_raw)
+        if any(marker in role_name_clean for marker in markers):
+            # Also double check for "2/3" literally in the name
+            return True
+        if "2/3" in name_raw:
             return True
     return False
 
@@ -6022,26 +6038,17 @@ async def send_zero_stat_warnings(
                 )
                 continue
             if member_has_warning_blocking_role(member):
-                log.info(
-                    "Варн матча #%s пропущен: у %s есть исключающая роль",
-                    result.get("match_id"),
-                    user_id,
-                )
+                msg = f"🛡 {supervisor_tag if supervisor_tag else ''} варн матча #{result['match_id']} игроку <@{user_id}> пропущен: **исключающая роль** (FPL curator / Division curator / 2/3 warn)."
+                await admin_command_channel.send(msg[:2000])
                 continue
             if not member_has_warning_eligible_league_role(member):
-                log.info(
-                    "Варн матча #%s пропущен для %s: нет роли Prospect/Division",
-                    result.get("match_id"),
-                    user_id,
-                )
+                msg = f"🛡 {supervisor_tag if supervisor_tag else ''} варн матча #{result['match_id']} игроку <@{user_id}> пропущен: **нет роли Prospect/Division**."
+                await admin_command_channel.send(msg[:2000])
                 continue
             league_type = warning_league_type(member)
             if league_type is None:
-                log.info(
-                    "Матч #%s: игрок #%s пропущен — не удалось определить тип лиги",
-                    result.get("match_id"),
-                    user_id,
-                )
+                msg = f"🛡 {supervisor_tag if supervisor_tag else ''} варн матча #{result['match_id']} игроку <@{user_id}> пропущен: **не удалось определить тип лиги**."
+                await admin_command_channel.send(msg[:2000])
                 continue
 
             target = f"<@{user_id}>"
