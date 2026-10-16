@@ -5773,10 +5773,23 @@ async def post_warn_command(
     # lands in the correct field (игрок / тип / причина).
     try:
         warn_cmd: Optional[object] = None
-        async for cmd in channel.application_commands(query="warn", limit=50):
-            if str(getattr(cmd, "name", "")).lower() == "warn":
-                warn_cmd = cmd
+        # Try finding the command via global guild search first (more reliable for custom bots)
+        guild = getattr(channel, "guild", None)
+        command_sources = []
+        if guild is not None:
+            command_sources.append(guild.application_commands(query="warn", limit=50))
+        command_sources.append(channel.application_commands(query="warn", limit=50))
+
+        seen_commands = []
+        for source in command_sources:
+            if warn_cmd is not None:
                 break
+            async for cmd in source:
+                cmd_name = str(getattr(cmd, "name", "")).lower()
+                seen_commands.append(cmd_name)
+                if cmd_name == "warn":
+                    warn_cmd = cmd
+                    break
         
         if warn_cmd is not None:
             # Dynamically map our data to slash command options.
@@ -5800,17 +5813,15 @@ async def post_warn_command(
                     return
                 except Exception as invoke_exc:
                     # If the slash command failed to execute, report it to Discord
-                    # so the admin can see exactly why (e.g. wrong choice format)
                     import traceback
                     err_msg = "".join(traceback.format_exception(type(invoke_exc), invoke_exc, invoke_exc.__traceback__))[-1000:]
-                    await channel.send(f"⚠️ Ошибка вызова slash-команды `/warn` (матч #{match_id}):\n```python\n{err_msg}\n```")
+                    log.error("Матч #%s: Ошибка вызова slash-команды: %s", match_id, err_msg)
                     raise invoke_exc
             else:
                 opts = [opt.name for opt in getattr(warn_cmd, "options", [])]
-                await channel.send(f"⚠️ Slash-команда `/warn` найдена, но поля не совпали. Ожидались: {opts}")
                 log.warning("Автоварн матча #%s: у команды /warn не найдены нужные поля %s", match_id, opts)
         else:
-            await channel.send(f"⚠️ Slash-команда `/warn` не найдена на этом сервере/канале (бот не видит её).")
+            log.warning("Матч #%s: Slash-команда /warn не найдена. Видимые команды: %s", match_id, seen_commands)
                 
     except Exception as exc:
         log.warning(
