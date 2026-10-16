@@ -557,11 +557,18 @@ def save_warning_settings_data(data: dict) -> None:
 
 
 def auto_warns_enabled() -> bool:
+    """Return True unless explicitly disabled via TG button or env AUTO_WARN_ENABLED=false."""
+    # Check env override first
+    env_val = os.getenv("AUTO_WARN_ENABLED", "").strip().lower()
+    if env_val in {"0", "false", "no", "off"}:
+        return False
+    # Then check persistent file (set by TG button)
     data = load_warning_settings_data()
     value = data.get("enabled")
     if isinstance(value, bool):
         return value
-    return AUTO_WARN_ENABLED_DEFAULT
+    # Default: always enabled
+    return True
 
 
 def set_auto_warns_enabled(enabled: bool) -> bool:
@@ -5974,12 +5981,16 @@ async def send_zero_stat_warnings(
     prepared_images: Optional[tuple[list[bytes], list[str]]] = None,
 ) -> None:
     """Send only exact auto-warns, and only via `/warn` in admin-commands."""
+    warns_on = auto_warns_enabled()
     log.info(
-        "Матч #%s: send_zero_stat_warnings запущен, auto_warns_enabled=%s",
+        "Матч #%s: send_zero_stat_warnings запущен, auto_warns_enabled=%s, "
+        "WARN_COMMAND_CHANNEL_ID=%s, AUTOREG_WARNS_CHANNEL_ID=%s",
         result.get("match_id"),
-        auto_warns_enabled(),
+        warns_on,
+        WARN_COMMAND_CHANNEL_ID or "не задан",
+        AUTOREG_WARNS_CHANNEL_ID or "не задан",
     )
-    if not auto_warns_enabled():
+    if not warns_on:
         log.info(
             "Автоварны отключены настройкой (матч #%s)",
             result.get("match_id"),
@@ -7884,6 +7895,15 @@ async def on_raw_reaction_add(payload) -> None:
 @client.event
 async def on_ready() -> None:
     log.info("Селф-бот успешно авторизован: %s | версия %s", client.user, BOT_VERSION)
+    log.info(
+        "Автоварны: %s | Файл настроек: %s | WARN_COMMAND_CHANNEL_ID=%s | "
+        "AUTOREG_WARNS_CHANNEL_ID=%s | WARN_SUPERVISOR_QUERY=%r",
+        "ВКЛЮЧЕНЫ" if auto_warns_enabled() else "ВЫКЛЮЧЕНЫ",
+        WARNING_SETTINGS_FILE,
+        WARN_COMMAND_CHANNEL_ID or "не задан",
+        AUTOREG_WARNS_CHANNEL_ID or "не задан",
+        WARN_SUPERVISOR_QUERY,
+    )
     if GEMINI_RESERVE_KEYS_IGNORED:
         log.warning(
             "В GEMINI_RESERVE_API_KEYS больше %s ключей — лишние %s не используются.",
