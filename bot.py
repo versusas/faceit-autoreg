@@ -298,6 +298,7 @@ PRIORITY_CHANNEL_IDS = parse_channel_ids("PRIORITY_CHANNEL_IDS")
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
 WARN_CHANNEL_ID = int(os.getenv("WARN_CHANNEL_ID", "0"))
 WARN_COMMAND_CHANNEL_ID = int(os.getenv("WARN_COMMAND_CHANNEL_ID", "0"))
+AUTOREG_WARNS_CHANNEL_ID = int(os.getenv("AUTOREG_WARNS_CHANNEL_ID", "0"))
 WARNING_SETTINGS_FILE = os.getenv(
     "WARNING_SETTINGS_FILE",
     "./data/warning_settings.json",
@@ -5804,9 +5805,18 @@ async def post_warn_command(
     )
     await channel.send(fallback[:2000])
     log.info(
-        "Автоварн матча #%s: /warn отправлен текстом (slash-команда недоступна)",
+        "Автоварн матча #%s: /warn отправлен текстом (slash-команда недоступна/ошибка)",
         match_id,
     )
+
+async def resolve_autoreg_warns_channel():
+    if AUTOREG_WARNS_CHANNEL_ID:
+        channel = client.get_channel(AUTOREG_WARNS_CHANNEL_ID)
+        if channel is None:
+            with contextlib.suppress(Exception):
+                channel = await client.fetch_channel(AUTOREG_WARNS_CHANNEL_ID)
+        return channel
+    return None
 
 
 async def send_warning_with_screenshot(
@@ -5997,6 +6007,9 @@ async def send_zero_stat_warnings(
                 result.get("match_id"),
             )
             return
+            
+        autoreg_warns_channel = await resolve_autoreg_warns_channel()
+        notification_channel = autoreg_warns_channel or admin_command_channel
 
         warning_log_channel = None
         if LOG_CHANNEL_ID:
@@ -6160,7 +6173,7 @@ async def send_zero_stat_warnings(
                 )
                 # Tag supervisor ONLY when player already has 2/3 warns
                 if needs_supervisor and supervisor_tag:
-                    await admin_command_channel.send(
+                    await notification_channel.send(
                         (
                             f"⚠️ {supervisor_tag} последний варн перед баном!\n"
                             f"Матч #{result['match_id']}\n"
@@ -6180,10 +6193,10 @@ async def send_zero_stat_warnings(
                 sent_warnings += 1 
                 continue
 
-            if warning_channel is not None:
+            if notification_channel is not None:
                 try:
                     await send_warning_with_screenshot(
-                        warning_channel,
+                        notification_channel,
                         evidence_text,
                         int(result["match_id"]),
                         source_images,
@@ -6230,7 +6243,7 @@ async def send_zero_stat_warnings(
             elif LOG_CHANNEL_ID:
                 await notify_log_channel(log_text)
 
-        # ── Uncertain players → notify supervisor via LOG_CHANNEL only ──
+        # ── Uncertain players → notify supervisor via AUTOREG_WARNS_CHANNEL or LOG_CHANNEL ──
         if uncertain_players and supervisor_tag:
             uncertain_lines = [
                 f"🔍 **Матч #{result['match_id']}** — бот не уверен, варн НЕ выдан:",
@@ -6247,12 +6260,16 @@ async def send_zero_stat_warnings(
                 )
                 uncertain_lines.append(f"• {player_label} — {warn_reason} ({reason})")
             uncertain_text = f"{supervisor_tag}\n" + "\n".join(uncertain_lines)
-            # Send to LOG_CHANNEL only, NOT admin-commands
-            await notify_log_channel(uncertain_text[:2000])
-            log.info(
-                "Матч #%s: неуверенные варны переданы supervisor в лог-канал",
-                result.get("match_id"),
-            )
+            
+            try:
+                await notification_channel.send(uncertain_text[:2000])
+                log.info(
+                    "Матч #%s: неуверенные варны переданы supervisor в канал варнов",
+                    result.get("match_id"),
+                )
+            except Exception:
+                log.exception("Не удалось отправить uncertain-варны в канал варнов")
+                await notify_log_channel(uncertain_text[:2000])
         log.info(
             "Матч #%s: отправлено строгих автоварнов %s из %s",
             result.get("match_id"),
