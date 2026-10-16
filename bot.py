@@ -5752,11 +5752,52 @@ async def post_warn_command(
     reason_text: str,
     match_id: int,
 ) -> None:
-    command = (
+    """Send /warn as a real Discord slash command with separate option fields."""
+    full_reason = f"{reason_text} - #{match_id}"
+
+    # Try to invoke the /warn slash command properly so each option
+    # lands in the correct field (игрок / тип / причина).
+    try:
+        warn_cmd: Optional[object] = None
+        async for cmd in channel.application_commands(query="warn", limit=25):
+            cmd_name = str(getattr(cmd, "name", "") or "").lower()
+            if cmd_name == "warn" and not getattr(cmd, "is_group", lambda: False)():
+                warn_cmd = cmd
+                break
+        if warn_cmd is not None:
+            # Map kwarg names to whatever the slash command exposes.
+            # discord.py-self resolves option names automatically.
+            target = await client.fetch_user(user_id)
+            await warn_cmd(
+                channel,
+                игрок=target,
+                тип=league_type,
+                причина=full_reason,
+            )
+            log.info(
+                "Автоварн матча #%s: /warn вызван как slash-команда для <@%s>",
+                match_id,
+                user_id,
+            )
+            return
+    except Exception as exc:
+        log.warning(
+            "Автоварн матча #%s: не удалось вызвать /warn как slash-команду (%s), "
+            "отправляю текстом",
+            match_id,
+            exc,
+        )
+
+    # Fallback: send as plain text so at least something arrives.
+    fallback = (
         f"/warn игрок <@{user_id}> тип {league_type} "
-        f"причина {reason_text} - #{match_id}"
+        f"причина {full_reason}"
     )
-    await channel.send(command[:2000])
+    await channel.send(fallback[:2000])
+    log.info(
+        "Автоварн матча #%s: /warn отправлен текстом (slash-команда недоступна)",
+        match_id,
+    )
 
 
 async def send_warning_with_screenshot(
@@ -5994,30 +6035,19 @@ async def send_zero_stat_warnings(
         )
 
         match_id_str = str(result.get("match_id") or "?")
-        diag_lines = [
-            f"🤖 **Автоварны матч #{match_id_str}** — диагностика",
-            f"Кандидатов: {len(warning_players)}",
-            f"Supervisor: {supervisor_tag or 'не найден'}",
-            f"admin-commands канал: <#{getattr(admin_command_channel, 'id', '?')}>",
-        ]
-        for _, _, p in warning_players:
-            diag_lines.append(
-                f"• #{p.get('id')} `{p.get('nickname','')}` — "
-                f"причина: `{p.get('warning_reason','')}` "
-                f"certainty: `{p.get('warning_certainty','нет')}`"
-            )
-        try:
-            await admin_command_channel.send("\n".join(diag_lines)[:2000])
-        except Exception:
-            log.exception("Не удалось отправить диагностику в admin-commands")
-
+        # Diagnostics go only to Railway logs, NOT to admin-commands.
         log.info(
-            "Матч #%s: кандидатов на строгий автоварн %s (%s)",
+            "Матч #%s: автоварны запущены. Кандидатов: %s. Supervisor: %s. "
+            "admin-commands: #%s. Игроки: %s",
             result.get("match_id"),
             len(warning_players),
+            supervisor_tag or "не найден",
+            getattr(admin_command_channel, "id", "?"),
             ", ".join(
-                f"#{player.get('id')} {player.get('warning_reason')}"
-                for _, _, player in warning_players
+                f"#{p.get('id')} {p.get('nickname','')} "
+                f"reason={p.get('warning_reason','')} "
+                f"certainty={p.get('warning_certainty','нет')}"
+                for _, _, p in warning_players
             ),
         )
         sent_warnings = 0
@@ -6048,26 +6078,24 @@ async def send_zero_stat_warnings(
             # ── Certainty gate ──
             is_certain, certainty_reason = player_auto_warn_is_certain(player)
             if not is_certain:
-                identity_names = player_identity_names(player)
                 uncertain_players.append((certainty_reason, player, user_id))
-                try:
-                    await admin_command_channel.send(
-                        f"⚠️ Матч #{match_id_str}: игрок #{player.get('id')} "
-                        f"`{player.get('nickname','')}` — НЕ уверен: {certainty_reason}"
-                    )
-                except Exception:
-                    pass
+                log.info(
+                    "Матч #%s: игрок #%s `%s` — НЕ уверен: %s",
+                    match_id_str,
+                    player.get("id"),
+                    player.get("nickname", ""),
+                    certainty_reason,
+                )
                 continue
 
             if user_id is None or member is None:
                 uncertain_players.append(("Discord-профиль не найден", player, user_id))
-                try:
-                    await admin_command_channel.send(
-                        f"⚠️ Матч #{match_id_str}: игрок #{player.get('id')} "
-                        f"`{player.get('nickname','')}` — Discord-профиль не найден"
-                    )
-                except Exception:
-                    pass
+                log.info(
+                    "Матч #%s: игрок #%s `%s` — Discord-профиль не найден",
+                    match_id_str,
+                    player.get("id"),
+                    player.get("nickname", ""),
+                )
                 continue
             if user_id in PRO_LEAGUE_USER_IDS:
                 log.info(
@@ -6084,17 +6112,23 @@ async def send_zero_stat_warnings(
                 )
                 continue
             if member_has_warning_blocking_role(member):
-                msg = f"🛡 {supervisor_tag if supervisor_tag else ''} варн матча #{result['match_id']} игроку <@{user_id}> пропущен: **исключающая роль** (FPL curator / Division curator / 2/3 warn)."
-                await admin_command_channel.send(msg[:2000])
+                log.info(
+                    "Матч #%s: варн <@%s> пропущен — исключающая роль",
+                    result.get("match_id"), user_id,
+                )
                 continue
             if not member_has_warning_eligible_league_role(member):
-                msg = f"🛡 {supervisor_tag if supervisor_tag else ''} варн матча #{result['match_id']} игроку <@{user_id}> пропущен: **нет роли Prospect/Division**."
-                await admin_command_channel.send(msg[:2000])
+                log.info(
+                    "Матч #%s: варн <@%s> пропущен — нет роли Prospect/Division",
+                    result.get("match_id"), user_id,
+                )
                 continue
             league_type = warning_league_type(member)
             if league_type is None:
-                msg = f"🛡 {supervisor_tag if supervisor_tag else ''} варн матча #{result['match_id']} игроку <@{user_id}> пропущен: **не удалось определить тип лиги**."
-                await admin_command_channel.send(msg[:2000])
+                log.info(
+                    "Матч #%s: варн <@%s> пропущен — не удалось определить тип лиги",
+                    result.get("match_id"), user_id,
+                )
                 continue
 
             target = f"<@{user_id}>"
@@ -6151,7 +6185,7 @@ async def send_zero_stat_warnings(
                     )
             sent_warnings += 1
 
-            # ── Log issued warn to LOG_CHANNEL ──
+            # ── Log issued warn to LOG_CHANNEL (Railway server log channel) ──
             log_text = (
                 f"✅ **Автоварн выдан** — матч #{result['match_id']}\n"
                 f"Игрок: {target} (#{player.get('id')})\n"
@@ -6160,6 +6194,13 @@ async def send_zero_stat_warnings(
             )
             if needs_supervisor:
                 log_text += "\n⚠️ Роль 2/3 — последний варн перед баном!"
+            log.info(
+                "Матч #%s: автоварн выдан — <@%s> %s %s",
+                result.get("match_id"),
+                user_id,
+                reason_text,
+                league_type,
+            )
             if warning_log_channel is not None:
                 try:
                     await send_warning_with_screenshot(
@@ -6178,8 +6219,8 @@ async def send_zero_stat_warnings(
             elif LOG_CHANNEL_ID:
                 await notify_log_channel(log_text)
 
-        # ── Uncertain players → notify supervisor without /warn ──
-        if uncertain_players:
+        # ── Uncertain players → notify supervisor via LOG_CHANNEL only ──
+        if uncertain_players and supervisor_tag:
             uncertain_lines = [
                 f"🔍 **Матч #{result['match_id']}** — бот не уверен, варн НЕ выдан:",
             ]
@@ -6194,18 +6235,13 @@ async def send_zero_stat_warnings(
                     str(player.get("warning_reason") or "неизвестно"),
                 )
                 uncertain_lines.append(f"• {player_label} — {warn_reason} ({reason})")
-            uncertain_text = "\n".join(uncertain_lines)
-            if supervisor_tag:
-                uncertain_text = f"{supervisor_tag}\n{uncertain_text}"
-            try:
-                await admin_command_channel.send(uncertain_text[:2000])
-            except Exception:
-                log.exception(
-                    "Не удалось отправить уведомление supervisor о неуверенных варнах матча #%s",
-                    result.get("match_id"),
-                )
-            # Also log uncertain to LOG_CHANNEL
+            uncertain_text = f"{supervisor_tag}\n" + "\n".join(uncertain_lines)
+            # Send to LOG_CHANNEL only, NOT admin-commands
             await notify_log_channel(uncertain_text[:2000])
+            log.info(
+                "Матч #%s: неуверенные варны переданы supervisor в лог-канал",
+                result.get("match_id"),
+            )
         log.info(
             "Матч #%s: отправлено строгих автоварнов %s из %s",
             result.get("match_id"),
