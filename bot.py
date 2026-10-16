@@ -4018,19 +4018,23 @@ async def recognize_match(
             ]
         )
     )
-    if (
+    # If auto-warns are active, we MUST perform a visual audit even for
+    # complete cards to detect nickname mismatches or hidden 0/0/0 rows.
+    # Otherwise, skip the AI request for speed.
+    can_skip_visual = (
         card_result is not None
         and card_result.get("ct_team") in ("A", "B")
-        # A normal completed game has a 13+ winner.  A sub-13 result may be a
-        # surrender and must still inspect the screenshot before registration.
         and max(
             int(card_result.get("score_a", 0) or 0),
             int(card_result.get("score_b", 0) or 0),
         ) >= 13
         and not card_has_placeholder_stats
-    ):
+        and not auto_warns_enabled() # <--- Key fix: don't skip if warns are ON
+    )
+
+    if can_skip_visual:
         log.info(
-            "Матч #%s разобран напрямую без запроса к ИИ",
+            "Матч #%s разобран напрямую без запроса к ИИ (автоварны выкл)",
             card_result["match_id"],
         )
         return card_result
@@ -5769,34 +5773,43 @@ async def post_warn_command(
     # lands in the correct field (игрок / тип / причина).
     try:
         warn_cmd: Optional[object] = None
-        # We look for "warn" specifically.
         async for cmd in channel.application_commands(query="warn", limit=50):
-            cmd_name = str(getattr(cmd, "name", "") or "").lower()
-            if cmd_name == "warn":
+            if str(getattr(cmd, "name", "")).lower() == "warn":
                 warn_cmd = cmd
                 break
         
         if warn_cmd is not None:
-            # We already have the member object, no need to fetch.
-            await warn_cmd(
-                channel,
-                игрок=target_member,
-                тип=league_type,
-                причина=full_reason,
-            )
-            log.info(
-                "Автоварн матча #%s: /warn вызван как slash-команда для <@%s>",
-                match_id,
-                user_id,
-            )
-            return
+            # Dynamically map our data to slash command options.
+            # We try both Russian and English internal names.
+            kwargs = {}
+            for opt in getattr(warn_cmd, "options", []):
+                opt_name = str(getattr(opt, "name", "")).lower()
+                if opt_name in {"игрок", "user", "member", "player"}:
+                    kwargs[opt.name] = target_member
+                elif opt_name in {"тип", "type", "league"}:
+                    kwargs[opt.name] = league_type
+                elif opt_name in {"причина", "reason"}:
+                    kwargs[opt.name] = full_reason
+            
+            if len(kwargs) >= 2: # At least player and reason/type
+                await warn_cmd(channel, **kwargs)
+                log.info(
+                    "Автоварн матча #%s: /warn (slash) отправлен для <@%s> с полями: %s",
+                    match_id, user_id, list(kwargs.keys()),
+                )
+                return
+            else:
+                log.warning("Автоварн матча #%s: у команды /warn не найдены нужные поля", match_id)
+                
     except Exception as exc:
         log.warning(
-            "Автоварн матча #%s: не удалось вызвать /warn как slash-команду (%s), "
-            "отправляю текстом",
-            match_id,
-            exc,
+            "Автоварн матча #%s: ошибка slash-команды (%s), шлю текстом",
+            match_id, exc,
         )
+
+    # Fallback: send as plain text
+    fallback = f"/warn игрок <@{user_id}> тип {league_type} причина {full_reason}"
+    await channel.send(fallback[:2000])
 
     # Fallback: send as plain text so at least something arrives.
     fallback = (
