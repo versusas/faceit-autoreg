@@ -5780,36 +5780,43 @@ async def post_warn_command(
         
         if warn_cmd is not None:
             # Dynamically map our data to slash command options.
-            # We try both Russian and English internal names.
             kwargs = {}
             for opt in getattr(warn_cmd, "options", []):
                 opt_name = str(getattr(opt, "name", "")).lower()
-                if opt_name in {"игрок", "user", "member", "player"}:
+                if "игрок" in opt_name or "user" in opt_name or "member" in opt_name or "player" in opt_name:
                     kwargs[opt.name] = target_member
-                elif opt_name in {"тип", "type", "league"}:
+                elif "тип" in opt_name or "type" in opt_name or "league" in opt_name:
                     kwargs[opt.name] = league_type
-                elif opt_name in {"причина", "reason"}:
+                elif "причина" in opt_name or "reason" in opt_name:
                     kwargs[opt.name] = full_reason
             
-            if len(kwargs) >= 2: # At least player and reason/type
-                await warn_cmd(channel, **kwargs)
-                log.info(
-                    "Автоварн матча #%s: /warn (slash) отправлен для <@%s> с полями: %s",
-                    match_id, user_id, list(kwargs.keys()),
-                )
-                return
+            if len(kwargs) >= 2:
+                try:
+                    await warn_cmd(channel, **kwargs)
+                    log.info(
+                        "Автоварн матча #%s: /warn (slash) отправлен для <@%s> с полями: %s",
+                        match_id, user_id, list(kwargs.keys()),
+                    )
+                    return
+                except Exception as invoke_exc:
+                    # If the slash command failed to execute, report it to Discord
+                    # so the admin can see exactly why (e.g. wrong choice format)
+                    import traceback
+                    err_msg = "".join(traceback.format_exception(type(invoke_exc), invoke_exc, invoke_exc.__traceback__))[-1000:]
+                    await channel.send(f"⚠️ Ошибка вызова slash-команды `/warn` (матч #{match_id}):\n```python\n{err_msg}\n```")
+                    raise invoke_exc
             else:
-                log.warning("Автоварн матча #%s: у команды /warn не найдены нужные поля", match_id)
+                opts = [opt.name for opt in getattr(warn_cmd, "options", [])]
+                await channel.send(f"⚠️ Slash-команда `/warn` найдена, но поля не совпали. Ожидались: {opts}")
+                log.warning("Автоварн матча #%s: у команды /warn не найдены нужные поля %s", match_id, opts)
+        else:
+            await channel.send(f"⚠️ Slash-команда `/warn` не найдена на этом сервере/канале (бот не видит её).")
                 
     except Exception as exc:
         log.warning(
             "Автоварн матча #%s: ошибка slash-команды (%s), шлю текстом",
             match_id, exc,
         )
-
-    # Fallback: send as plain text
-    fallback = f"/warn игрок <@{user_id}> тип {league_type} причина {full_reason}"
-    await channel.send(fallback[:2000])
 
     # Fallback: send as plain text so at least something arrives.
     fallback = (
