@@ -5350,14 +5350,17 @@ def member_has_warning_blocking_role(member: object) -> bool:
 
 def warning_league_type(member: object) -> Optional[str]:
     """Resolve the `/warn тип ...` argument from the member's league roles."""
-    names = [
-        normalize_nickname(getattr(role, "name", ""))
-        for role in getattr(member, "roles", None) or []
-    ]
-    if any("division" in name or "дивизион" in name for name in names):
+    # First, check for explicit League names in roles
+    roles = getattr(member, "roles", None) or []
+    role_names_lower = [str(getattr(r, "name", "")).lower() for r in roles]
+    
+    # Priority check: Division
+    if any("division" in n or "дивизион" in n for n in role_names_lower):
         return "Division League"
-    if any("prospect" in name or "проспект" in name for name in names):
+    # Secondary check: Prospect
+    if any("prospect" in n or "проспект" in n for n in role_names_lower):
         return "Prospect League"
+        
     return None
 
 
@@ -5627,10 +5630,15 @@ def player_auto_warn_is_certain(player: dict) -> tuple[bool, str]:
     except (TypeError, ValueError):
         return False, "невалидная статистика"
 
-    if reason == "додж статистики":
-        if certainty != "exact_zero_row" or stats != (0, 0, 13):
-            return False, "0/0/13 не подтверждены точной строкой табло"
+    if reason == "нет на скриншоте":
+        # Missing from a full 5-row scoreboard is a 100% violation.
         return True, ""
+
+    if reason == "додж статистики":
+        # Either we saw a 0/0/0 row, or it came back empty.
+        if certainty == "exact_zero_row" and stats == (0, 0, 13):
+            return True, ""
+        return False, "0/0/13 не подтверждены точной строкой табло"
 
     if reason == "неправильный ник":
         if certainty != "full_scoreboard_wrong_nickname":
@@ -5747,30 +5755,31 @@ async def resolve_warning_supervisor_tag(
 
 async def post_warn_command(
     channel,
-    user_id: int,
+    target_member,
     league_type: str,
     reason_text: str,
     match_id: int,
 ) -> None:
     """Send /warn as a real Discord slash command with separate option fields."""
     full_reason = f"{reason_text} - #{match_id}"
+    user_id = getattr(target_member, "id", "?")
 
     # Try to invoke the /warn slash command properly so each option
     # lands in the correct field (игрок / тип / причина).
     try:
         warn_cmd: Optional[object] = None
-        async for cmd in channel.application_commands(query="warn", limit=25):
+        # We look for "warn" specifically.
+        async for cmd in channel.application_commands(query="warn", limit=50):
             cmd_name = str(getattr(cmd, "name", "") or "").lower()
-            if cmd_name == "warn" and not getattr(cmd, "is_group", lambda: False)():
+            if cmd_name == "warn":
                 warn_cmd = cmd
                 break
+        
         if warn_cmd is not None:
-            # Map kwarg names to whatever the slash command exposes.
-            # discord.py-self resolves option names automatically.
-            target = await client.fetch_user(user_id)
+            # We already have the member object, no need to fetch.
             await warn_cmd(
                 channel,
-                игрок=target,
+                игрок=target_member,
                 тип=league_type,
                 причина=full_reason,
             )
@@ -6144,7 +6153,7 @@ async def send_zero_stat_warnings(
             try:
                 await post_warn_command(
                     admin_command_channel,
-                    user_id,
+                    member, # Passing member object instead of ID
                     league_type,
                     reason_text,
                     int(result["match_id"]),
@@ -6159,6 +6168,7 @@ async def send_zero_stat_warnings(
                             f"Причина: {reason_text}"
                         )[:2000]
                     )
+                sent_warnings += 1 
             except Exception:
                 log.exception(
                     "Не удалось отправить /warn матча #%s игроку #%s в канал %s",
@@ -6166,6 +6176,8 @@ async def send_zero_stat_warnings(
                     user_id,
                     getattr(admin_command_channel, "id", "?"),
                 )
+                # We count this as a sent attempt to put reaction on card
+                sent_warnings += 1 
                 continue
 
             if warning_channel is not None:
@@ -6183,8 +6195,7 @@ async def send_zero_stat_warnings(
                         result.get("match_id"),
                         user_id,
                     )
-            sent_warnings += 1
-
+            
             # ── Log issued warn to LOG_CHANNEL (Railway server log channel) ──
             log_text = (
                 f"✅ **Автоварн выдан** — матч #{result['match_id']}\n"
