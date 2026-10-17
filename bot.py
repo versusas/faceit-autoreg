@@ -5807,6 +5807,8 @@ async def post_warn_command(
             for opt in getattr(warn_cmd, "options", []):
                 opt_name = str(getattr(opt, "name", "")).lower()
                 if "игрок" in opt_name or "user" in opt_name or "member" in opt_name or "player" in opt_name:
+                    # In some API versions, user option needs the Member object,
+                    # in others it expects a string ID. Try the object first.
                     kwargs[opt.name] = target_member
                 elif "тип" in opt_name or "type" in opt_name or "league" in opt_name:
                     kwargs[opt.name] = league_type
@@ -5841,6 +5843,13 @@ async def post_warn_command(
             "Автоварн матча #%s: ошибка slash-команды (%s), шлю текстом",
             match_id, exc,
         )
+        # Force the error report into admin-commands so we can see it immediately
+        if not error_report:
+            error_report = f"⚠️ Ошибка slash-команды: `{type(exc).__name__}: {exc}`"
+        try:
+            await channel.send(error_report[:2000])
+        except Exception:
+            pass
 
     # Fallback: send as plain text so at least something arrives.
     fallback = (
@@ -5852,12 +5861,6 @@ async def post_warn_command(
         "Автоварн матча #%s: /warn отправлен текстом (slash-команда недоступна/ошибка)",
         match_id,
     )
-    
-    if error_report and notification_channel is not None:
-        try:
-            await notification_channel.send(error_report[:2000])
-        except Exception:
-            pass
 
 async def resolve_autoreg_warns_channel():
     if AUTOREG_WARNS_CHANNEL_ID:
