@@ -6248,10 +6248,11 @@ async def send_zero_stat_warnings(
                 sent_warnings += 1 
                 continue
 
-            if notification_channel is not None:
+            # Evidence (screenshot + player mention) → WARN_CHANNEL_ID (ELITE FPL #варны)
+            if warning_channel is not None:
                 try:
                     await send_warning_with_screenshot(
-                        notification_channel,
+                        warning_channel,
                         evidence_text,
                         int(result["match_id"]),
                         source_images,
