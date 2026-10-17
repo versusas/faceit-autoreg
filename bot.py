@@ -5771,10 +5771,13 @@ async def post_warn_command(
     league_type: str,
     reason_text: str,
     match_id: int,
+    notification_channel=None,
 ) -> None:
     """Send /warn as a real Discord slash command with separate option fields."""
     full_reason = f"{reason_text} - #{match_id}"
     user_id = getattr(target_member, "id", "?")
+
+    error_report = ""
 
     # Try to invoke the /warn slash command properly so each option
     # lands in the correct field (игрок / тип / причина).
@@ -5822,12 +5825,15 @@ async def post_warn_command(
                     # If the slash command failed to execute, report it to Discord
                     import traceback
                     err_msg = "".join(traceback.format_exception(type(invoke_exc), invoke_exc, invoke_exc.__traceback__))[-1000:]
+                    error_report = f"⚠️ Ошибка вызова slash-команды `/warn`: ```python\n{err_msg}\n```"
                     log.error("Матч #%s: Ошибка вызова slash-команды: %s", match_id, err_msg)
                     raise invoke_exc
             else:
                 opts = [opt.name for opt in getattr(warn_cmd, "options", [])]
+                error_report = f"⚠️ Slash-команда `/warn` найдена, но поля не совпали. Ожидались: {opts}"
                 log.warning("Автоварн матча #%s: у команды /warn не найдены нужные поля %s", match_id, opts)
         else:
+            error_report = f"⚠️ Slash-команда `/warn` не найдена ботом (видимые команды: {seen_commands[:15]})"
             log.warning("Матч #%s: Slash-команда /warn не найдена. Видимые команды: %s", match_id, seen_commands)
                 
     except Exception as exc:
@@ -5846,6 +5852,12 @@ async def post_warn_command(
         "Автоварн матча #%s: /warn отправлен текстом (slash-команда недоступна/ошибка)",
         match_id,
     )
+    
+    if error_report and notification_channel is not None:
+        try:
+            await notification_channel.send(error_report[:2000])
+        except Exception:
+            pass
 
 async def resolve_autoreg_warns_channel():
     if AUTOREG_WARNS_CHANNEL_ID:
@@ -6212,6 +6224,7 @@ async def send_zero_stat_warnings(
                     league_type,
                     reason_text,
                     int(result["match_id"]),
+                    notification_channel=notification_channel,
                 )
                 # Tag supervisor ONLY when player already has 2/3 warns
                 if needs_supervisor and supervisor_tag:
