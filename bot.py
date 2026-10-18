@@ -5783,19 +5783,14 @@ async def post_warn_command(
     # lands in the correct field (игрок / тип / причина).
     try:
         warn_cmd: Optional[object] = None
-        command_sources = []
-        command_sources.append(channel.application_commands())
-
-        seen_commands = []
-        for source in command_sources:
-            if warn_cmd is not None:
+        commands = await channel.application_commands()
+        seen_commands: list[str] = []
+        for cmd in commands:
+            cmd_name = str(getattr(cmd, "name", "")).lower()
+            seen_commands.append(cmd_name)
+            if cmd_name == "warn":
+                warn_cmd = cmd
                 break
-            async for cmd in source:
-                cmd_name = str(getattr(cmd, "name", "")).lower()
-                seen_commands.append(cmd_name)
-                if cmd_name == "warn":
-                    warn_cmd = cmd
-                    break
         
         if warn_cmd is not None:
             # Dynamically map our data to slash command options.
