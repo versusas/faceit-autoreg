@@ -6243,8 +6243,8 @@ async def send_zero_stat_warnings(
                     user_id,
                     getattr(admin_command_channel, "id", "?"),
                 )
-                # We count this as a sent attempt to put reaction on card
-                sent_warnings += 1 
+                # If both slash and text fallback failed, we DON'T increment sent_warnings
+                # and thus no green checkmark will be placed for this player.
                 continue
 
             # Evidence (screenshot + player mention) → WARN_CHANNEL_ID (ELITE FPL #варны)
