@@ -29,6 +29,10 @@ BOT_VERSION = "v81-strict-auto-warns-admin-commands-2026-10-15"
 
 # Railway environment variables
 DISCORD_USER_TOKEN = os.environ["DISCORD_USER_TOKEN"]
+WARN_DISCORD_USER_TOKEN = os.getenv("WARN_DISCORD_USER_TOKEN", "").strip()
+USE_SEPARATE_WARN_CLIENT = bool(
+    WARN_DISCORD_USER_TOKEN and WARN_DISCORD_USER_TOKEN != DISCORD_USER_TOKEN
+)
 _key_candidates: list[str] = []
 for key_number in range(1, 11):
     value = os.getenv(f"GEMINI_API_KEY_{key_number}", "").strip()
@@ -363,8 +367,44 @@ logging.basicConfig(
 log = logging.getLogger("faceit-reg-self")
 
 client = discord.Client()
+warn_client = discord.Client() if USE_SEPARATE_WARN_CLIENT else client
 BOT_STARTED_AT = datetime.now(timezone.utc)
 is_active = False
+
+
+def warn_dispatch_client() -> discord.Client:
+    return warn_client
+
+
+async def warn_dispatch_channel(channel):
+    """Return the same channel resolved in the warn-client session."""
+    exec_client = warn_dispatch_client()
+    if exec_client is client:
+        return channel
+    channel_id = int(getattr(channel, "id", 0) or 0)
+    resolved = exec_client.get_channel(channel_id)
+    if resolved is None:
+        resolved = await exec_client.fetch_channel(channel_id)
+    return resolved
+
+
+async def warn_dispatch_member(channel, user_id: int):
+    """Resolve the warned member in the warn-client session."""
+    exec_client = warn_dispatch_client()
+    exec_channel = await warn_dispatch_channel(channel)
+    guild = getattr(exec_channel, "guild", None)
+    if guild is not None:
+        member = guild.get_member(user_id)
+        if member is None:
+            with contextlib.suppress(Exception):
+                member = await guild.fetch_member(user_id)
+        if member is not None:
+            return member
+    fetched_user = exec_client.get_user(user_id)
+    if fetched_user is None:
+        with contextlib.suppress(Exception):
+            fetched_user = await exec_client.fetch_user(user_id)
+    return fetched_user
 active_channel_ids: set[int] = set()
 processed_message_ids: set[int] = set()
 gemini_assignment_index = 0
@@ -5772,21 +5812,20 @@ async def resolve_warning_supervisor_tag(
 
 async def wait_for_warn_confirmation(channel, target_user_id: int, timeout: float = 20.0) -> bool:
     """Wait for the moderation bot to reply with 'Готово' for this specific player."""
-    start_time = time.monotonic()
-    
+    exec_client = warn_dispatch_client()
+    exec_channel = await warn_dispatch_channel(channel)
+
     def check(m):
-        if m.channel.id != channel.id:
+        if int(getattr(getattr(m, "channel", None), "id", 0) or 0) != int(getattr(exec_channel, "id", 0) or 0):
             return False
-        content = str(m.content).lower()
-        # Look for the successful 'Готово' pattern from the league bot
+        content = str(getattr(m, "content", "") or "").lower()
         if "готово" in content and "варн" in content:
-            # Check if the message mentions the player or contains their ID
-            if f"<@{target_user_id}>" in m.content or str(target_user_id) in m.content:
+            if f"<@{target_user_id}>" in str(getattr(m, "content", "")) or str(target_user_id) in str(getattr(m, "content", "")):
                 return True
         return False
 
     try:
-        await client.wait_for("message", check=check, timeout=timeout)
+        await exec_client.wait_for("message", check=check, timeout=timeout)
         return True
     except asyncio.TimeoutError:
         return False
@@ -5802,15 +5841,15 @@ async def post_warn_command(
 ) -> None:
     """Send /warn as a real Discord slash command with separate option fields."""
     full_reason = f"{reason_text} - #{match_id}"
-    user_id = getattr(target_member, "id", "?")
-
+    user_id = int(getattr(target_member, "id", 0) or 0)
     error_report = ""
+    exec_client = warn_dispatch_client()
+    exec_channel = await warn_dispatch_channel(channel)
+    exec_target = await warn_dispatch_member(exec_channel, user_id)
 
-    # Try to invoke the /warn slash command properly so each option
-    # lands in the correct field (игрок / тип / причина).
     try:
         warn_cmd: Optional[object] = None
-        commands = await channel.application_commands()
+        commands = await exec_channel.application_commands()
         seen_commands: list[str] = []
         for cmd in commands:
             cmd_name = str(getattr(cmd, "name", "")).lower()
@@ -5818,39 +5857,39 @@ async def post_warn_command(
             if cmd_name == "warn":
                 warn_cmd = cmd
                 break
-        
+
         if warn_cmd is not None:
-            # Dynamically map our data to slash command options.
             kwargs = {}
             for opt in getattr(warn_cmd, "options", []):
                 opt_name = str(getattr(opt, "name", "")).lower()
-                if "игрок" in opt_name or "user" in opt_name or "member" in opt_name or "player" in opt_name:
-                    # In some API versions, user option needs the Member object,
-                    # in others it expects a string ID. Try the object first.
-                    kwargs[opt.name] = target_member
-                elif "тип" in opt_name or "type" in opt_name or "league" in opt_name:
+                if any(key in opt_name for key in ("игрок", "user", "member", "player")):
+                    kwargs[opt.name] = exec_target
+                elif any(key in opt_name for key in ("тип", "type", "league")):
                     kwargs[opt.name] = league_type
-                elif "причина" in opt_name or "reason" in opt_name:
+                elif any(key in opt_name for key in ("причина", "reason")):
                     kwargs[opt.name] = full_reason
-            
+
             if len(kwargs) >= 2:
                 try:
-                    await warn_cmd(channel, **kwargs)
+                    await warn_cmd(exec_channel, **kwargs)
                     log.info(
-                        "Автоварн матча #%s: /warn (slash) отправлен для <@%s> с полями: %s",
-                        match_id, user_id, list(kwargs.keys()),
+                        "Автоварн матча #%s: /warn (slash) отправлен для <@%s> через %s с полями: %s",
+                        match_id,
+                        user_id,
+                        exec_client.user,
+                        list(kwargs.keys()),
                     )
                     return
                 except discord.Forbidden as forbidden_exc:
-                    # Specific help for 403 Forbidden
-                    me = channel.guild.me if hasattr(channel, "guild") else client.user
+                    me = getattr(getattr(exec_channel, "guild", None), "me", None) or exec_client.user
                     my_roles = [r.name for r in getattr(me, "roles", [])]
                     error_report = (
                         f"🚫 **Ошибка прав (403 Forbidden)**\n"
-                        f"Аккаунт авторега: `{client.user}`\n"
-                        f"Канал: <#{channel.id}>\n"
+                        f"Аккаунт варнов: `{exec_client.user}`\n"
+                        f"Канал: <#{getattr(exec_channel, 'id', 0)}>\n"
                         f"Роли этого аккаунта: `{', '.join(my_roles)}`\n"
-                        f"**Что сделать:** Выдай аккаунту `{client.user}` права «Использовать команды приложений» в канале <#{channel.id}>."
+                        f"**Что сделать:** Выдай аккаунту `{exec_client.user}` права "
+                        f"«Использовать команды приложений» в канале <#{getattr(exec_channel, 'id', 0)}> ."
                     )
                     raise forbidden_exc
                 except Exception as invoke_exc:
@@ -5860,34 +5899,37 @@ async def post_warn_command(
                     raise invoke_exc
             else:
                 opts = [opt.name for opt in getattr(warn_cmd, "options", [])]
-                error_report = f"⚠️ Slash-команда `/warn` найдена, но поля не совпали. Ожидались: {opts}"
+                error_report = f"⚠️ У команды `/warn` не найдены поля. Вижу: `{opts}`"
                 log.warning("Автоварн матча #%s: у команды /warn не найдены нужные поля %s", match_id, opts)
         else:
-            error_report = f"⚠️ Slash-команда `/warn` не найдена ботом (видимые команды: {seen_commands[:15]})"
+            error_report = (
+                f"⚠️ Slash-команда `/warn` не видна аккаунту `{exec_client.user}`. "
+                f"Вижу: `{seen_commands[:20]}`"
+            )
             log.warning("Матч #%s: Slash-команда /warn не найдена. Видимые команды: %s", match_id, seen_commands)
-                
+
     except Exception as exc:
         log.warning(
             "Автоварн матча #%s: ошибка slash-команды (%s), шлю текстом",
-            match_id, exc,
+            match_id,
+            exc,
         )
-        # Force the error report into admin-commands so we can see it immediately
-        if not error_report:
-            error_report = f"⚠️ Ошибка slash-команды: `{type(exc).__name__}: {exc}`"
-        try:
-            await channel.send(error_report[:2000])
-        except Exception:
-            pass
+        if error_report:
+            with contextlib.suppress(Exception):
+                await exec_channel.send(error_report[:2000])
+            if notification_channel:
+                with contextlib.suppress(Exception):
+                    await notification_channel.send(error_report[:2000])
 
-    # Fallback: send as plain text so at least something arrives.
     fallback = (
         f"/warn игрок <@{user_id}> тип {league_type} "
         f"причина {full_reason}"
     )
-    await channel.send(fallback[:2000])
+    await exec_channel.send(fallback[:2000])
     log.info(
-        "Автоварн матча #%s: /warn отправлен текстом (slash-команда недоступна/ошибка)",
+        "Автоварн матча #%s: /warn отправлен текстом через %s (slash-команда недоступна/ошибка)",
         match_id,
+        exec_client.user,
     )
 
 async def resolve_autoreg_warns_channel():
@@ -8524,5 +8566,24 @@ async def on_message(message: discord.Message) -> None:
         await process_message_once(message)
 
 
+if USE_SEPARATE_WARN_CLIENT:
+    @warn_client.event
+    async def on_ready() -> None:
+        log.info(
+            "Варн-клиент успешно авторизован: %s | токен WARN_DISCORD_USER_TOKEN активен",
+            warn_client.user,
+        )
+
+
+async def run_discord_clients() -> None:
+    if USE_SEPARATE_WARN_CLIENT:
+        await asyncio.gather(
+            client.start(DISCORD_USER_TOKEN),
+            warn_client.start(WARN_DISCORD_USER_TOKEN),
+        )
+    else:
+        await client.start(DISCORD_USER_TOKEN)
+
+
 if __name__ == "__main__":
-    client.run(DISCORD_USER_TOKEN)
+    asyncio.run(run_discord_clients())
