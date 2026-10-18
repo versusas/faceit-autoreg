@@ -5783,11 +5783,7 @@ async def post_warn_command(
     # lands in the correct field (игрок / тип / причина).
     try:
         warn_cmd: Optional[object] = None
-        # Try finding the command via global guild search first (more reliable for custom bots)
-        guild = getattr(channel, "guild", None)
         command_sources = []
-        if guild is not None:
-            command_sources.append(guild.application_commands(query="warn", limit=50))
         command_sources.append(channel.application_commands(query="warn", limit=50))
 
         seen_commands = []
