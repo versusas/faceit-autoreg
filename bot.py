@@ -5332,10 +5332,13 @@ def member_has_pro_league_role(member: object) -> bool:
 
 def member_has_warning_eligible_league_role(member: object) -> bool:
     """Return True only for Prospect/Division members eligible for warnings."""
+    def clean(s):
+        return "".join(c for c in str(s).lower() if c.isalnum())
+        
     for role in getattr(member, "roles", None) or []:
-        role_name = normalize_nickname(getattr(role, "name", ""))
+        role_name = clean(getattr(role, "name", ""))
         if role_name and any(
-            normalize_nickname(fragment) in role_name
+            clean(fragment) in role_name
             for fragment in WARNING_ELIGIBLE_ROLE_FRAGMENTS
         ):
             return True
@@ -5362,15 +5365,17 @@ def member_has_warning_blocking_role(member: object) -> bool:
 
 def warning_league_type(member: object) -> Optional[str]:
     """Resolve the `/warn тип ...` argument from the member's league roles."""
-    # First, check for explicit League names in roles
+    def clean(s):
+        return "".join(c for c in str(s).lower() if c.isalnum())
+        
     roles = getattr(member, "roles", None) or []
-    role_names_lower = [str(getattr(r, "name", "")).lower() for r in roles]
+    role_names_clean = [clean(getattr(r, "name", "")) for r in roles]
     
     # Priority check: Division
-    if any("division" in n or "дивизион" in n for n in role_names_lower):
+    if any("division" in n or "дивизион" in n for n in role_names_clean):
         return "Division League"
     # Secondary check: Prospect
-    if any("prospect" in n or "проспект" in n for n in role_names_lower):
+    if any("prospect" in n or "проспект" in n for n in role_names_clean):
         return "Prospect League"
         
     return None
@@ -6166,6 +6171,8 @@ async def send_zero_stat_warnings(
                     player.get("nickname", ""),
                     certainty_reason,
                 )
+                # Count as handled even if skipped
+                sent_warnings += 1
                 continue
 
             if user_id is None or member is None:
@@ -6176,6 +6183,8 @@ async def send_zero_stat_warnings(
                     player.get("id"),
                     player.get("nickname", ""),
                 )
+                # Count as handled even if skipped
+                sent_warnings += 1
                 continue
             if user_id in PRO_LEAGUE_USER_IDS:
                 log.info(
@@ -6183,6 +6192,7 @@ async def send_zero_stat_warnings(
                     result.get("match_id"),
                     user_id,
                 )
+                sent_warnings += 1
                 continue
             if member_has_pro_league_role(member):
                 log.info(
@@ -6190,18 +6200,21 @@ async def send_zero_stat_warnings(
                     result.get("match_id"),
                     user_id,
                 )
+                sent_warnings += 1
                 continue
             if member_has_warning_blocking_role(member):
                 log.info(
                     "Матч #%s: варн <@%s> пропущен — исключающая роль",
                     result.get("match_id"), user_id,
                 )
+                sent_warnings += 1
                 continue
             if not member_has_warning_eligible_league_role(member):
                 log.info(
                     "Матч #%s: варн <@%s> пропущен — нет роли Prospect/Division",
                     result.get("match_id"), user_id,
                 )
+                sent_warnings += 1
                 continue
             league_type = warning_league_type(member)
             if league_type is None:
@@ -6209,6 +6222,7 @@ async def send_zero_stat_warnings(
                     "Матч #%s: варн <@%s> пропущен — не удалось определить тип лиги",
                     result.get("match_id"), user_id,
                 )
+                sent_warnings += 1
                 continue
 
             target = f"<@{user_id}>"
