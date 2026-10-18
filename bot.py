@@ -5784,7 +5784,7 @@ async def post_warn_command(
     try:
         warn_cmd: Optional[object] = None
         command_sources = []
-        command_sources.append(channel.application_commands(limit=50))
+        command_sources.append(channel.application_commands())
 
         seen_commands = []
         for source in command_sources:
