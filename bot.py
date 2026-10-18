@@ -7905,6 +7905,102 @@ async def on_raw_reaction_add(payload) -> None:
         await send_registration_stats(channel, mode)
 
 
+RETRY_WARNS_LIMIT = int(os.getenv("RETRY_WARNS_LIMIT", "30"))
+
+
+async def retry_pending_warns() -> int:
+    """Read last N messages from WARN_CHANNEL_ID, find those without ✅, and issue /warn."""
+    if not WARN_CHANNEL_ID or not WARN_COMMAND_CHANNEL_ID:
+        log.info("retry_pending_warns: WARN_CHANNEL_ID или WARN_COMMAND_CHANNEL_ID не заданы")
+        return 0
+    if not auto_warns_enabled():
+        return 0
+
+    try:
+        warn_channel = client.get_channel(WARN_CHANNEL_ID)
+        if warn_channel is None:
+            warn_channel = await client.fetch_channel(WARN_CHANNEL_ID)
+        admin_channel = client.get_channel(WARN_COMMAND_CHANNEL_ID)
+        if admin_channel is None:
+            admin_channel = await client.fetch_channel(WARN_COMMAND_CHANNEL_ID)
+    except Exception:
+        log.exception("retry_pending_warns: не удалось открыть каналы")
+        return 0
+
+    notification_ch = await resolve_autoreg_warns_channel()
+
+    issued = 0
+    async for msg in warn_channel.history(limit=RETRY_WARNS_LIMIT):
+        # Skip messages with any reaction (already handled)
+        reactions = getattr(msg, "reactions", None) or []
+        if any(int(getattr(r, "count", 0) or 0) > 0 for r in reactions):
+            continue
+        # Skip messages not from us
+        if not client.user or getattr(getattr(msg, "author", None), "id", None) != client.user.id:
+            continue
+
+        text = str(getattr(msg, "content", "") or "")
+        # Parse: first line = @mention or @#ID | nick
+        # Second line = reason - #match_id
+        lines = text.strip().split("\n")
+        if len(lines) < 2:
+            continue
+
+        # Extract match ID from second line
+        match_id_match = re.search(r"#(\d{4,6})", lines[1])
+        if not match_id_match:
+            continue
+        match_id = int(match_id_match.group(1))
+
+        # Extract player mention from first line
+        mention_match = re.search(r"<@!?(\d{15,22})>", lines[0])
+        if not mention_match:
+            continue
+        user_id = int(mention_match.group(1))
+
+        # Extract reason text (before " - #")
+        reason_match = re.match(r"(.+?)\s*-\s*#\d+", lines[1])
+        reason_text = reason_match.group(1).strip() if reason_match else lines[1].strip()
+
+        # Try to find the member to determine league type
+        member = None
+        guild = getattr(warn_channel, "guild", None) or getattr(admin_channel, "guild", None)
+        if guild is not None:
+            member = guild.get_member(user_id)
+            if member is None:
+                with contextlib.suppress(Exception):
+                    member = await guild.fetch_member(user_id)
+
+        if member is None:
+            log.info("retry_pending_warns: матч #%s — участник %s не найден, пропуск", match_id, user_id)
+            continue
+
+        league_type = warning_league_type(member)
+        if league_type is None:
+            log.info("retry_pending_warns: матч #%s — не определена лига для %s", match_id, user_id)
+            continue
+
+        # Issue /warn
+        try:
+            await post_warn_command(
+                admin_channel,
+                member,
+                league_type,
+                reason_text,
+                match_id,
+                notification_channel=notification_ch,
+            )
+            issued += 1
+            # Mark as handled
+            with contextlib.suppress(Exception):
+                await msg.add_reaction("✅")
+            log.info("retry_pending_warns: выдан /warn для матча #%s игроку <@%s>", match_id, user_id)
+        except Exception:
+            log.exception("retry_pending_warns: ошибка /warn матча #%s", match_id)
+
+    return issued
+
+
 @client.event
 async def on_ready() -> None:
     log.info("Селф-бот успешно авторизован: %s | версия %s", client.user, BOT_VERSION)
@@ -7926,6 +8022,18 @@ async def on_ready() -> None:
     # Запускаем фоновый опрос команд от Telegram-бота
     asyncio.get_event_loop().create_task(tg_command_polling_task())
     log.info("Фоновый опрос ТГ-команд запущен (каждые 3 с, файл: %s)", TG_COMMANDS_FILE)
+    # Retry pending warns from WARN_CHANNEL that don't have ✅ yet
+    if auto_warns_enabled() and WARN_CHANNEL_ID and WARN_COMMAND_CHANNEL_ID:
+        async def _retry_warns_background():
+            await asyncio.sleep(5)  # Wait for bot to fully connect
+            try:
+                count = await retry_pending_warns()
+                if count:
+                    log.info("При старте выдано %s /warn из необработанных варнов", count)
+            except Exception:
+                log.exception("Ошибка при retry_pending_warns при старте")
+        asyncio.get_event_loop().create_task(_retry_warns_background())
+        log.info("Фоновый retry_pending_warns запланирован (последние %s сообщений)", RETRY_WARNS_LIMIT)
 
 
 @client.event
