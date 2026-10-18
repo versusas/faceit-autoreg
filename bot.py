@@ -5814,12 +5814,22 @@ async def post_warn_command(
                         match_id, user_id, list(kwargs.keys()),
                     )
                     return
+                except discord.Forbidden as forbidden_exc:
+                    # Specific help for 403 Forbidden
+                    me = channel.guild.me if hasattr(channel, "guild") else client.user
+                    my_roles = [r.name for r in getattr(me, "roles", [])]
+                    error_report = (
+                        f"🚫 **Ошибка прав (403 Forbidden)**\n"
+                        f"Аккаунт авторега: `{client.user}`\n"
+                        f"Канал: <#{channel.id}>\n"
+                        f"Роли этого аккаунта: `{', '.join(my_roles)}`\n"
+                        f"**Что сделать:** Выдай аккаунту `{client.user}` права «Использовать команды приложений» в канале <#{channel.id}>."
+                    )
+                    raise forbidden_exc
                 except Exception as invoke_exc:
-                    # If the slash command failed to execute, report it to Discord
                     import traceback
                     err_msg = "".join(traceback.format_exception(type(invoke_exc), invoke_exc, invoke_exc.__traceback__))[-1000:]
-                    error_report = f"⚠️ Ошибка вызова slash-команды `/warn`: ```python\n{err_msg}\n```"
-                    log.error("Матч #%s: Ошибка вызова slash-команды: %s", match_id, err_msg)
+                    error_report = f"⚠️ Ошибка вызова `/warn`: ```python\n{err_msg}\n```"
                     raise invoke_exc
             else:
                 opts = [opt.name for opt in getattr(warn_cmd, "options", [])]
