@@ -5770,6 +5770,28 @@ async def resolve_warning_supervisor_tag(
     return None
 
 
+async def wait_for_warn_confirmation(channel, target_user_id: int, timeout: float = 20.0) -> bool:
+    """Wait for the moderation bot to reply with 'Готово' for this specific player."""
+    start_time = time.monotonic()
+    
+    def check(m):
+        if m.channel.id != channel.id:
+            return False
+        content = str(m.content).lower()
+        # Look for the successful 'Готово' pattern from the league bot
+        if "готово" in content and "варн" in content:
+            # Check if the message mentions the player or contains their ID
+            if f"<@{target_user_id}>" in m.content or str(target_user_id) in m.content:
+                return True
+        return False
+
+    try:
+        await client.wait_for("message", check=check, timeout=timeout)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
 async def post_warn_command(
     channel,
     target_member,
@@ -6171,8 +6193,6 @@ async def send_zero_stat_warnings(
                     player.get("nickname", ""),
                     certainty_reason,
                 )
-                # Count as handled even if skipped
-                sent_warnings += 1
                 continue
 
             if user_id is None or member is None:
@@ -6183,8 +6203,6 @@ async def send_zero_stat_warnings(
                     player.get("id"),
                     player.get("nickname", ""),
                 )
-                # Count as handled even if skipped
-                sent_warnings += 1
                 continue
             if user_id in PRO_LEAGUE_USER_IDS:
                 log.info(
@@ -6192,7 +6210,6 @@ async def send_zero_stat_warnings(
                     result.get("match_id"),
                     user_id,
                 )
-                sent_warnings += 1
                 continue
             if member_has_pro_league_role(member):
                 log.info(
@@ -6200,21 +6217,18 @@ async def send_zero_stat_warnings(
                     result.get("match_id"),
                     user_id,
                 )
-                sent_warnings += 1
                 continue
             if member_has_warning_blocking_role(member):
                 log.info(
                     "Матч #%s: варн <@%s> пропущен — исключающая роль",
                     result.get("match_id"), user_id,
                 )
-                sent_warnings += 1
                 continue
             if not member_has_warning_eligible_league_role(member):
                 log.info(
                     "Матч #%s: варн <@%s> пропущен — нет роли Prospect/Division",
                     result.get("match_id"), user_id,
                 )
-                sent_warnings += 1
                 continue
             league_type = warning_league_type(member)
             if league_type is None:
@@ -6222,7 +6236,6 @@ async def send_zero_stat_warnings(
                     "Матч #%s: варн <@%s> пропущен — не удалось определить тип лиги",
                     result.get("match_id"), user_id,
                 )
-                sent_warnings += 1
                 continue
 
             target = f"<@{user_id}>"
@@ -6244,6 +6257,16 @@ async def send_zero_stat_warnings(
                     int(result["match_id"]),
                     notification_channel=notification_channel,
                 )
+                
+                # Wait for mod bot to say 'Готово' before counting as success
+                confirmed = await wait_for_warn_confirmation(admin_command_channel, user_id)
+                
+                if confirmed:
+                    sent_warnings += 1
+                    log.info("Матч #%s: варн игроку <@%s> подтверждён ботом сервера", result['match_id'], user_id)
+                else:
+                    log.warning("Матч #%s: варн игроку <@%s> отправлен, но 'Готово' не получено", result['match_id'], user_id)
+
                 # Tag supervisor ONLY when player already has 2/3 warns
                 if needs_supervisor and supervisor_tag:
                     await notification_channel.send(
@@ -6251,10 +6274,10 @@ async def send_zero_stat_warnings(
                             f"⚠️ {supervisor_tag} последний варн перед баном!\n"
                             f"Матч #{result['match_id']}\n"
                             f"Игрок: {target} (роль 2/3)\n"
-                            f"Причина: {reason_text}"
+                            f"Причина: {reason_text}\n"
+                            f"Статус подтверждения: {'✅ Подтверждено' if confirmed else '❌ Не подтверждено'}"
                         )[:2000]
                     )
-                sent_warnings += 1 
             except Exception:
                 log.exception(
                     "Не удалось отправить /warn матча #%s игроку #%s в канал %s",
@@ -6262,8 +6285,6 @@ async def send_zero_stat_warnings(
                     user_id,
                     getattr(admin_command_channel, "id", "?"),
                 )
-                # If both slash and text fallback failed, we DON'T increment sent_warnings
-                # and thus no green checkmark will be placed for this player.
                 continue
 
             # Evidence (screenshot + player mention) → WARN_CHANNEL_ID (ELITE FPL #варны)
@@ -8009,11 +8030,17 @@ async def retry_pending_warns() -> int:
                 match_id,
                 notification_channel=notification_ch,
             )
-            issued += 1
-            # Mark as handled
-            with contextlib.suppress(Exception):
-                await msg.add_reaction("✅")
-            log.info("retry_pending_warns: выдан /warn для матча #%s игроку <@%s>", match_id, user_id)
+            
+            # Wait for confirmation
+            if await wait_for_warn_confirmation(admin_channel, user_id):
+                issued += 1
+                # Mark as handled
+                with contextlib.suppress(Exception):
+                    await msg.add_reaction("✅")
+                log.info("retry_pending_warns: варн матча #%s подтверждён, галочка поставлена", match_id)
+            else:
+                log.warning("retry_pending_warns: варн матча #%s отправлен, но не подтверждён ботом", match_id)
+                
         except Exception:
             log.exception("retry_pending_warns: ошибка /warn матча #%s", match_id)
 
