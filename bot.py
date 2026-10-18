@@ -312,6 +312,8 @@ AUTO_WARN_ENABLED_DEFAULT = os.getenv("AUTO_WARN_ENABLED", "true").lower() in {
 }
 WARN_SUPERVISOR_QUERY = os.getenv("WARN_SUPERVISOR_QUERY", "versus2739").strip()
 WARN_SUPERVISOR_ID = int(os.getenv("WARN_SUPERVISOR_ID", "0"))
+WARN_DIVISION_SUPERVISOR_QUERY = os.getenv("WARN_DIVISION_SUPERVISOR_QUERY", "dead.111").strip()
+WARN_DIVISION_SUPERVISOR_ID = int(os.getenv("WARN_DIVISION_SUPERVISOR_ID", "0"))
 PRO_LEAGUE_USER_IDS: set[int] = {
     # Вставляйте Discord user ID игроков Про Лиги сюда, по одному на строку:
     # 111111111111111111,
@@ -1166,7 +1168,7 @@ def build_status_html(status: dict[str, object]) -> str:
 <body>
 <main>
   <header>
-    <div><h1>FACEIT AutoReg</h1><p class="sub">Отчёт готовности без токенов и API-ключей</p></div>
+    <div><h1>FACEIT AutoReg</h1></div>
     <div class="badge"><span class="dot"></span>Бот на связи</div>
   </header>
   <section class="grid">
@@ -5753,18 +5755,22 @@ async def resolve_warning_supervisor_tag(
     source_message: discord.Message,
     warning_channel,
     admin_channel,
+    *,
+    query_override: Optional[str] = None,
+    user_id_override: Optional[int] = None,
 ) -> Optional[str]:
     """Resolve the moderator who must be pinged alongside an auto-warn."""
-    if WARN_SUPERVISOR_ID > 0:
+    supervisor_id = user_id_override if user_id_override is not None else WARN_SUPERVISOR_ID
+    if supervisor_id > 0:
         member = await warning_member(
-            WARN_SUPERVISOR_ID,
+            supervisor_id,
             source_message,
             warning_channel or admin_channel,
         )
         if member is not None:
-            return f"<@{WARN_SUPERVISOR_ID}>"
+            return f"<@{supervisor_id}>"
 
-    query = WARN_SUPERVISOR_QUERY.strip()
+    query = (query_override if query_override is not None else WARN_SUPERVISOR_QUERY).strip()
     if not query:
         return None
     normalized_query = normalize_nickname(query)
@@ -5810,25 +5816,48 @@ async def resolve_warning_supervisor_tag(
     return None
 
 
-async def wait_for_warn_confirmation(channel, target_user_id: int, timeout: float = 20.0) -> bool:
+async def wait_for_warn_confirmation(
+    channel,
+    target_user_id: int,
+    registration_player_id: Optional[int] = None,
+    target_names: Optional[list[str]] = None,
+    timeout: float = 20.0,
+) -> bool:
     """Wait for the moderation bot to reply with 'Готово' for this specific player."""
     exec_client = warn_dispatch_client()
     exec_channel = await warn_dispatch_channel(channel)
+    target_names = [name for name in (target_names or []) if name]
+
+    def matches_confirmation_text(raw: str) -> bool:
+        content = str(raw or "")
+        lowered = content.lower()
+        if "готово" not in lowered or "варн" not in lowered:
+            return False
+        if f"<@{target_user_id}>" in content or str(target_user_id) in content:
+            return True
+        if registration_player_id is not None and f"#{registration_player_id}" in content:
+            return True
+        lowered_names = [str(name).lower() for name in target_names]
+        return any(name and name in lowered for name in lowered_names)
 
     def check(m):
         if int(getattr(getattr(m, "channel", None), "id", 0) or 0) != int(getattr(exec_channel, "id", 0) or 0):
             return False
-        content = str(getattr(m, "content", "") or "").lower()
-        if "готово" in content and "варн" in content:
-            if f"<@{target_user_id}>" in str(getattr(m, "content", "")) or str(target_user_id) in str(getattr(m, "content", "")):
-                return True
-        return False
+        return matches_confirmation_text(str(getattr(m, "content", "") or ""))
 
     try:
         await exec_client.wait_for("message", check=check, timeout=timeout)
         return True
     except asyncio.TimeoutError:
-        return False
+        pass
+
+    # Ephemeral or interaction-based replies may not fire a normal message event.
+    # Re-read a short recent window from history before declaring failure.
+    with contextlib.suppress(Exception):
+        async for candidate in exec_channel.history(limit=10):
+            if matches_confirmation_text(str(getattr(candidate, "content", "") or "")):
+                return True
+    return False
 
 
 async def post_warn_command(
@@ -6177,7 +6206,7 @@ async def send_zero_stat_warnings(
             source_message,
             mention_names,
         )
-        supervisor_tag = await resolve_warning_supervisor_tag(
+        default_supervisor_tag = await resolve_warning_supervisor_tag(
             source_message,
             warning_context_channel,
             admin_command_channel,
@@ -6190,7 +6219,7 @@ async def send_zero_stat_warnings(
             "admin-commands: #%s. Игроки: %s",
             result.get("match_id"),
             len(warning_players),
-            supervisor_tag or "не найден",
+            default_supervisor_tag or "не найден",
             getattr(admin_command_channel, "id", "?"),
             ", ".join(
                 f"#{p.get('id')} {p.get('nickname','')} "
@@ -6287,6 +6316,15 @@ async def send_zero_stat_warnings(
             ).rstrip(". ")
             evidence_text = f"{target}\n{reason_text} - #{result['match_id']}"
 
+            # Division warns ping a separate moderator.
+            supervisor_tag = await resolve_warning_supervisor_tag(
+                source_message,
+                warning_context_channel,
+                admin_command_channel,
+                query_override=(WARN_DIVISION_SUPERVISOR_QUERY if league_type == "Division League" else None),
+                user_id_override=(WARN_DIVISION_SUPERVISOR_ID if league_type == "Division League" else None),
+            ) or default_supervisor_tag
+
             # ── Check if this player has the 2/3 role → needs supervisor attention ──
             needs_supervisor = member_has_23_warn_role(member)
 
@@ -6301,7 +6339,12 @@ async def send_zero_stat_warnings(
                 )
                 
                 # Wait for mod bot to say 'Готово' before counting as success
-                confirmed = await wait_for_warn_confirmation(admin_command_channel, user_id)
+                confirmed = await wait_for_warn_confirmation(
+                    admin_command_channel,
+                    user_id,
+                    registration_player_id=int(player.get("id") or 0),
+                    target_names=player_identity_names(player),
+                )
                 
                 if confirmed:
                     sent_warnings += 1
@@ -6381,7 +6424,18 @@ async def send_zero_stat_warnings(
                 await notify_log_channel(log_text)
 
         # ── Uncertain players → notify supervisor via AUTOREG_WARNS_CHANNEL or LOG_CHANNEL ──
-        if uncertain_players and supervisor_tag:
+        uncertain_has_division = any(
+            "division" in str(reason).lower() or "division" in str(player.get("warning_reason", "")).lower()
+            for reason, player, _uid in uncertain_players
+        )
+        uncertain_supervisor_tag = await resolve_warning_supervisor_tag(
+            source_message,
+            warning_context_channel,
+            admin_command_channel,
+            query_override=(WARN_DIVISION_SUPERVISOR_QUERY if uncertain_has_division else None),
+            user_id_override=(WARN_DIVISION_SUPERVISOR_ID if uncertain_has_division else None),
+        ) or default_supervisor_tag
+        if uncertain_players and uncertain_supervisor_tag:
             uncertain_lines = [
                 f"🔍 **Матч #{result['match_id']}** — бот не уверен, варн НЕ выдан:",
             ]
@@ -6396,7 +6450,7 @@ async def send_zero_stat_warnings(
                     str(player.get("warning_reason") or "неизвестно"),
                 )
                 uncertain_lines.append(f"• {player_label} — {warn_reason} ({reason})")
-            uncertain_text = f"{supervisor_tag}\n" + "\n".join(uncertain_lines)
+            uncertain_text = f"{uncertain_supervisor_tag}\n" + "\n".join(uncertain_lines)
             
             try:
                 await notification_channel.send(uncertain_text[:2000])
@@ -7911,6 +7965,8 @@ COMMANDS_HELP_TEXT = """📋 **Команды автореги**
 `стата` — статистика и график по дням за 14 дней; реакции 📅 / 🕐 переключают дни и часы
 `стата часы` — график по часам за 24 часа
 `команды` — этот список
+`авторег тут?` — краткий статус основного бота авторега
+`автоварн тут?` — краткий статус отдельного бота варнов
 
 **Старт / енд — только с выданными правами**
 `старт все` — регистрировать игры из обычного и приоритетного каналов: сначала старые карточки, потом новые
@@ -8034,11 +8090,13 @@ async def retry_pending_warns() -> int:
             continue
         match_id = int(match_id_match.group(1))
 
-        # Extract player mention from first line
+        # Extract player mention and short registration ID from first line
         mention_match = re.search(r"<@!?(\d{15,22})>", lines[0])
         if not mention_match:
             continue
         user_id = int(mention_match.group(1))
+        short_id_match = re.search(r"#\s*(\d{1,5})", lines[0])
+        short_registration_id = int(short_id_match.group(1)) if short_id_match else None
 
         # Extract reason text (before " - #")
         reason_match = re.match(r"(.+?)\s*-\s*#\d+", lines[1])
@@ -8074,7 +8132,12 @@ async def retry_pending_warns() -> int:
             )
             
             # Wait for confirmation
-            if await wait_for_warn_confirmation(admin_channel, user_id):
+            if await wait_for_warn_confirmation(
+                admin_channel,
+                user_id,
+                registration_player_id=short_registration_id,
+                target_names=[getattr(member, "display_name", ""), getattr(member, "name", "")],
+            ):
                 issued += 1
                 # Mark as handled
                 with contextlib.suppress(Exception):
@@ -8170,6 +8233,24 @@ async def on_message(message: discord.Message) -> None:
 
     if command == "команды":
         await message.channel.send(COMMANDS_HELP_TEXT)
+        return
+
+    if re.fullmatch(r"авторег\s+тут\s*\?*", command, re.I):
+        active_text = "активен" if is_active else "остановлен"
+        await message.channel.send(
+            f"🟢 Авторег тут\n"
+            f"Сессия: `{client.user}`\n"
+            f"Статус: **{active_text}**\n"
+            f"Каналов: **{len(active_channel_ids)}**"
+        )
+        return
+
+    if re.fullmatch(r"автоварн\s+тут\s*\?*", command, re.I) and not USE_SEPARATE_WARN_CLIENT:
+        await message.channel.send(
+            f"🟢 Автоварн тут\n"
+            f"Сессия: `{client.user}`\n"
+            f"Отдельный токен WARN_DISCORD_USER_TOKEN: **не настроен**"
+        )
         return
 
     # ── Telegram rights from Discord ──
@@ -8573,6 +8654,19 @@ if USE_SEPARATE_WARN_CLIENT:
             "Варн-клиент успешно авторизован: %s | токен WARN_DISCORD_USER_TOKEN активен",
             warn_client.user,
         )
+
+    @warn_client.event
+    async def on_message(message: discord.Message) -> None:
+        if warn_client.user and getattr(getattr(message, "author", None), "id", None) == warn_client.user.id:
+            return
+        command = str(getattr(message, "content", "") or "").strip().lower()
+        if re.fullmatch(r"автоварн\s+тут\s*\?*", command, re.I):
+            await message.channel.send(
+                f"🟢 Автоварн тут\n"
+                f"Сессия: `{warn_client.user}`\n"
+                f"Канал /warn: **{WARN_COMMAND_CHANNEL_ID or 'не задан'}**\n"
+                f"Канал уведомлений: **{AUTOREG_WARNS_CHANNEL_ID or 'не задан'}**"
+            )
 
 
 async def run_discord_clients() -> None:
