@@ -303,6 +303,7 @@ LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
 WARN_CHANNEL_ID = int(os.getenv("WARN_CHANNEL_ID", "0"))
 WARN_COMMAND_CHANNEL_ID = int(os.getenv("WARN_COMMAND_CHANNEL_ID", "0"))
 AUTOREG_WARNS_CHANNEL_ID = int(os.getenv("AUTOREG_WARNS_CHANNEL_ID", "0"))
+WARN_PUNISHMENTS_CHANNEL_ID = int(os.getenv("WARN_PUNISHMENTS_CHANNEL_ID", "0"))
 WARNING_SETTINGS_FILE = os.getenv(
     "WARNING_SETTINGS_FILE",
     "./data/warning_settings.json",
@@ -5821,29 +5822,34 @@ async def wait_for_warn_confirmation(
     target_user_id: int,
     registration_player_id: Optional[int] = None,
     target_names: Optional[list[str]] = None,
+    match_id: Optional[int] = None,
     timeout: float = 20.0,
 ) -> bool:
-    """Wait for the moderation bot to reply with 'Готово' for this specific player."""
+    """A warn is successful only after the final `Варн выдан` card appears in punishments."""
     exec_client = warn_dispatch_client()
-    exec_channel = await warn_dispatch_channel(channel)
+    punishments_channel = await resolve_warn_punishments_channel(channel)
+    if punishments_channel is None:
+        return False
     target_names = [name for name in (target_names or []) if name]
 
     def matches_confirmation_text(raw: str) -> bool:
-        content = str(raw or "")
+        content = normalize_reply_text(str(raw or ""))
         lowered = content.lower()
-        if "готово" not in lowered or "варн" not in lowered:
+        if "варн выдан" not in lowered:
             return False
-        if f"<@{target_user_id}>" in content or str(target_user_id) in content:
+        if match_id is not None and not re.search(rf"#\s*{match_id}(?!\d)", content):
+            return False
+        if registration_player_id is not None and re.search(rf"#\s*{registration_player_id}(?!\d)", content):
             return True
-        if registration_player_id is not None and f"#{registration_player_id}" in content:
+        if f"<@{target_user_id}>" in content or str(target_user_id) in content:
             return True
         lowered_names = [str(name).lower() for name in target_names]
         return any(name and name in lowered for name in lowered_names)
 
     def check(m):
-        if int(getattr(getattr(m, "channel", None), "id", 0) or 0) != int(getattr(exec_channel, "id", 0) or 0):
+        if int(getattr(getattr(m, "channel", None), "id", 0) or 0) != int(getattr(punishments_channel, "id", 0) or 0):
             return False
-        return matches_confirmation_text(str(getattr(m, "content", "") or ""))
+        return matches_confirmation_text(registration_response_text(m))
 
     try:
         await exec_client.wait_for("message", check=check, timeout=timeout)
@@ -5851,11 +5857,9 @@ async def wait_for_warn_confirmation(
     except asyncio.TimeoutError:
         pass
 
-    # Ephemeral or interaction-based replies may not fire a normal message event.
-    # Re-read a short recent window from history before declaring failure.
     with contextlib.suppress(Exception):
-        async for candidate in exec_channel.history(limit=10):
-            if matches_confirmation_text(str(getattr(candidate, "content", "") or "")):
+        async for candidate in punishments_channel.history(limit=12):
+            if matches_confirmation_text(registration_response_text(candidate)):
                 return True
     return False
 
@@ -5969,6 +5973,31 @@ async def resolve_autoreg_warns_channel():
                 channel = await client.fetch_channel(AUTOREG_WARNS_CHANNEL_ID)
         return channel
     return None
+
+
+async def resolve_warn_punishments_channel(admin_channel):
+    """Channel where the league bot posts the final punishment card (`Варн выдан`)."""
+    exec_client = warn_dispatch_client()
+    if WARN_PUNISHMENTS_CHANNEL_ID:
+        channel = exec_client.get_channel(WARN_PUNISHMENTS_CHANNEL_ID)
+        if channel is None:
+            with contextlib.suppress(Exception):
+                channel = await exec_client.fetch_channel(WARN_PUNISHMENTS_CHANNEL_ID)
+        if channel is not None:
+            return channel
+
+    guild = getattr(await warn_dispatch_channel(admin_channel), "guild", None)
+    if guild is None:
+        return None
+    exact = {"наказания", "punishments", "punishment", "sanctions"}
+    fallback = None
+    for channel in getattr(guild, "text_channels", None) or []:
+        name = str(getattr(channel, "name", "") or "").casefold()
+        if name in exact:
+            return channel
+        if fallback is None and ("наказ" in name or "punish" in name or "sanction" in name):
+            fallback = channel
+    return fallback
 
 
 async def send_warning_with_screenshot(
@@ -6344,6 +6373,7 @@ async def send_zero_stat_warnings(
                     user_id,
                     registration_player_id=int(player.get("id") or 0),
                     target_names=player_identity_names(player),
+                    match_id=int(result.get("match_id") or 0),
                 )
                 
                 if confirmed:
@@ -8137,6 +8167,7 @@ async def retry_pending_warns() -> int:
                 user_id,
                 registration_player_id=short_registration_id,
                 target_names=[getattr(member, "display_name", ""), getattr(member, "name", "")],
+                match_id=match_id,
             ):
                 issued += 1
                 # Mark as handled
