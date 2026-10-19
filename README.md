@@ -5,7 +5,7 @@
 Set these in **Variables**:
 
 - `DISCORD_USER_TOKEN` — Discord account token for the main autoreg session.
-- `WARN_DISCORD_USER_TOKEN` — optional second Discord account token used only for issuing `/warn` commands when the main autoreg account lacks permission in `admin-commands`.
+- `WARN_DISCORD_USER_TOKEN` — optional second Discord account token used only for issuing `/warn` commands when the main autoreg account lacks permission in `admin-commands`. If this token is invalid, the app no longer crashes — it automatically falls back to the main `DISCORD_USER_TOKEN` and writes a warning to logs.
 - `WARN_PUNISHMENTS_CHANNEL_ID` — optional channel ID where the league bot publishes the final punishment card (`Варн выдан`). A warn counts as successful only after the bot sees the matching player and match number there.
 - `GEMINI_API_KEY_1`, `GEMINI_API_KEY_2`, etc. — separate Gemini-compatible API keys. Up to 10 numbered keys are supported and consecutive games rotate across them. Keys are never printed in logs. Legacy `GEMINI_API_KEYS` and `GEMINI_API_KEY` are also accepted.
 - `AI_API_STYLE` — use `openai` for AI STAR's general API, or `gemini` for the native Google protocol.

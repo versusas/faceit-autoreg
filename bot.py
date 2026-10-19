@@ -376,7 +376,7 @@ is_active = False
 
 
 def warn_dispatch_client() -> discord.Client:
-    return warn_client
+    return warn_client if warn_client_available else client
 
 
 async def warn_dispatch_channel(channel):
@@ -8284,6 +8284,16 @@ async def on_message(message: discord.Message) -> None:
         )
         return
 
+    if re.fullmatch(r"автоварн\s+тут\s*\?*", command, re.I) and USE_SEPARATE_WARN_CLIENT:
+        status_text = "отдельный warn-клиент активен" if warn_client_available else "fallback на основной клиент"
+        session_user = warn_client.user if warn_client_available and warn_client is not client else client.user
+        await message.channel.send(
+            f"🟢 Автоварн тут\n"
+            f"Сессия: `{session_user}`\n"
+            f"Статус: **{status_text}**"
+        )
+        return
+
     # ── Telegram rights from Discord ──
     tg_grant_match = re.match(
         r"^[!/]?выдать\s+права\s+тг\s+@?([A-Za-z0-9_]{3,32})",
@@ -8700,11 +8710,37 @@ if USE_SEPARATE_WARN_CLIENT:
             )
 
 
+warn_client_available = not USE_SEPARATE_WARN_CLIENT
+
+
+async def _run_warn_client_safe() -> None:
+    global warn_client_available, warn_client
+    if not USE_SEPARATE_WARN_CLIENT:
+        warn_client_available = False
+        return
+    try:
+        await warn_client.start(WARN_DISCORD_USER_TOKEN)
+        warn_client_available = True
+    except discord.LoginFailure:
+        warn_client_available = False
+        warn_client = client
+        log.error(
+            "WARN_DISCORD_USER_TOKEN невалиден. Варн-клиент отключён, "
+            "используется основной DISCORD_USER_TOKEN."
+        )
+    except Exception:
+        warn_client_available = False
+        warn_client = client
+        log.exception(
+            "Не удалось запустить warn-клиент. Варны переключены на основной клиент."
+        )
+
+
 async def run_discord_clients() -> None:
     if USE_SEPARATE_WARN_CLIENT:
         await asyncio.gather(
             client.start(DISCORD_USER_TOKEN),
-            warn_client.start(WARN_DISCORD_USER_TOKEN),
+            _run_warn_client_safe(),
         )
     else:
         await client.start(DISCORD_USER_TOKEN)
