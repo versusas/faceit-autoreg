@@ -5960,9 +5960,31 @@ async def post_warn_command(
         f"/warn игрок <@{user_id}> тип {league_type} "
         f"причина {full_reason}"
     )
-    await exec_channel.send(fallback[:2000])
+    try:
+        sent_fallback = await exec_channel.send(fallback[:2000])
+        log.info(
+            "Автоварн матча #%s: отправлен текстовый fallback, удаляю...",
+            match_id,
+        )
+        # Delete the useless text command attempt from admin-commands
+        with contextlib.suppress(Exception):
+            await sent_fallback.delete()
+    except Exception:
+        log.exception("Не удалось отправить/удалить fallback-текст варна")
+
+    # Notify autoreg logs that manual action is required
+    if notification_channel:
+        manual_msg = (
+            f"❌ **Не удалось выдать автоварн** (матч #{match_id})\n"
+            f"Игрок: <@{user_id}>\n"
+            f"Причина ошибки: {error_report or 'неизвестная ошибка slash-команд'}\n"
+            f"**Команда для ввода вручную:**\n`{fallback}`"
+        )
+        with contextlib.suppress(Exception):
+            await notification_channel.send(manual_msg)
+
     log.info(
-        "Автоварн матча #%s: /warn отправлен текстом через %s (slash-команда недоступна/ошибка)",
+        "Автоварн матча #%s: попытка завершена через %s (slash-команда не сработала)",
         match_id,
         exec_client.user,
     )
