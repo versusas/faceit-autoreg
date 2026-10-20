@@ -5948,11 +5948,13 @@ async def post_warn_command(
             exc,
         )
         if error_report:
-            with contextlib.suppress(Exception):
-                await exec_channel.send(error_report[:2000])
+            # Send error details only to autoreg logic channel, NOT to ELITE FPL admin-commands.
             if notification_channel:
                 with contextlib.suppress(Exception):
                     await notification_channel.send(error_report[:2000])
+            else:
+                # Fallback to server logs if no channel configured.
+                log.error("Матч #%s: %s", match_id, error_report)
 
     fallback = (
         f"/warn игрок <@{user_id}> тип {league_type} "
