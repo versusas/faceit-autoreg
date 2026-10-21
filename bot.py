@@ -286,7 +286,7 @@ def nicknames_match(first: object, second: object) -> bool:
 
 
 def allow_full_live_tab(audit: dict) -> bool:
-    """An opened TAB is acceptable only when all ten rows are visible."""
+    """An opened TAB follows the same acceptance rules as a final scoreboard."""
     try:
         left_players = list(audit.get("left_players") or [])
         right_players = list(audit.get("right_players") or [])
@@ -3644,7 +3644,6 @@ def result_from_review_card_and_modal(
         visual_audit
         and visual_audit.get("is_scoreboard")
         and visual_audit.get("is_final_result")
-        and not visual_audit.get("has_live_gameplay_hud")
     ):
         visual_players = [
             *list(visual_audit.get("left_players", [])),
@@ -7317,54 +7316,21 @@ async def process_upload(message: discord.Message, test_only: bool = False) -> N
             raw_images: list[bytes] = []
 
             async def discard_live_tab_card(audit: dict) -> bool:
-                """Live TABs are now accepted just like normal final screens."""
+                """Opened TAB scoreboards are accepted under the same rules as final screens."""
                 return False
-                log.info(
-                    "Матч #%s определён как открытый TAB, а не финальный экран.",
-                    reserved_match_id or "?",
-                )
-                # Test previews are intentionally non-destructive and must
-                # still return the generated =g command. Bypass only the final-
-                # screen gate for this preview; real registration is unchanged.
-                if test_only:
-                    audit["is_scoreboard"] = True
-                    audit["is_final_result"] = True
-                    audit["has_live_gameplay_hud"] = False
-                    audit["notes"] = (
-                        str(audit.get("notes", ""))
-                        + " Тестовый предпросмотр открытого TAB; в рабочем "
-                        "канале такая карточка пропускается и удаляется."
-                    ).strip()
-                    return False
-                # A card whose screenshot is an opened TAB is removed. The
-                # reason, the model's reading and a copy of the card go to logs
-                # first, so a wrongly rejected game can be registered by hand.
-                log.info(
-                    "Матч #%s пропущен как live TAB; карточка удаляется.",
-                    reserved_match_id or "?",
-                )
-                await send_processing_error_log(
-                    reserved_match_id or "?",
-                    message,
-                    "Скриншот распознан как открытый TAB во время игры, а не "
-                    "финальный экран — игра не зарегистрирована, карточка "
-                    "удалена (копия ниже).",
-                    visual_audit_summary(audit),
-                )
-                await delete_live_tab_card(message, reserved_match_id)
-                return True
 
             async def try_players_helper_fallback(audit: dict) -> Optional[dict]:
-                """Use the helper only after proving this is a final result."""
+                """Use the helper after proving this is a valid result scoreboard."""
                 nonlocal modal_text
-                # helper is a fallback for weak OCR.
+                # For both final result screens and opened TAB scoreboards,
+                # the helper is a fallback for weak OCR.
                 if (
                     not audit.get("is_scoreboard")
                     or not audit.get("is_final_result")
                 ):
                     log.info(
-                        "Матч #%s: «Получить игроков» не нажата — финальный "
-                        "экран не подтверждён.",
+                        "Матч #%s: «Получить игроков» не нажата — валидный "
+                        "результатный скрин не подтверждён.",
                         reserved_match_id or "?",
                     )
                     return None
