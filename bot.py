@@ -287,8 +287,6 @@ def nicknames_match(first: object, second: object) -> bool:
 
 def allow_full_live_tab(audit: dict) -> bool:
     """An opened TAB is acceptable only when all ten rows are visible."""
-    if not audit.get("has_live_gameplay_hud"):
-        return False
     try:
         left_players = list(audit.get("left_players") or [])
         right_players = list(audit.get("right_players") or [])
@@ -2702,7 +2700,6 @@ def result_from_nonzero_modal_and_final_score(
         or match is None
         or not audit.get("is_scoreboard")
         or not audit.get("is_final_result")
-        or audit.get("has_live_gameplay_hud")
     ):
         return None
     try:
@@ -2765,7 +2762,6 @@ def result_from_visual_audit(
         or match is None
         or not audit.get("is_scoreboard")
         or not audit.get("is_final_result")
-        or audit.get("has_live_gameplay_hud")
     ):
         return None
 
@@ -3604,7 +3600,6 @@ def result_from_review_card_and_modal(
     if visual_audit is not None and (
         not visual_audit.get("is_scoreboard")
         or not visual_audit.get("is_final_result")
-        or visual_audit.get("has_live_gameplay_hud")
     ):
         return None
     modal = parse_players_modal(modal_text)
@@ -7362,12 +7357,10 @@ async def process_upload(message: discord.Message, test_only: bool = False) -> N
             async def try_players_helper_fallback(audit: dict) -> Optional[dict]:
                 """Use the helper only after proving this is a final result."""
                 nonlocal modal_text
-                # Never click «Получить игроков» for an opened live TAB. The
-                # helper is only a fallback for weak OCR on a final screen.
+                # helper is a fallback for weak OCR.
                 if (
                     not audit.get("is_scoreboard")
                     or not audit.get("is_final_result")
-                    or audit.get("has_live_gameplay_hud")
                 ):
                     log.info(
                         "Матч #%s: «Получить игроков» не нажата — финальный "
@@ -7419,9 +7412,6 @@ async def process_upload(message: discord.Message, test_only: bool = False) -> N
                     message_text=context,
                     visual_audit=True,
                 )
-                if await discard_live_tab_card(audit):
-                    processing_completed = True
-                    return
                 result = result_from_card_and_visual_audit(context, audit)
                 if result is None:
                     result = await try_players_helper_fallback(audit)
@@ -7459,9 +7449,6 @@ async def process_upload(message: discord.Message, test_only: bool = False) -> N
                         message_text=context,
                         visual_audit=True,
                     )
-                    if await discard_live_tab_card(audit):
-                        processing_completed = True
-                        return
                     result = result_from_card_and_visual_audit(context, audit)
                     if result is None:
                         result = await try_players_helper_fallback(audit)
@@ -7500,9 +7487,6 @@ async def process_upload(message: discord.Message, test_only: bool = False) -> N
                         message_text=context,
                         visual_audit=True,
                     )
-                    if await discard_live_tab_card(audit):
-                        processing_completed = True
-                        return
 
                     helper_message = message
                     if (
