@@ -7976,7 +7976,9 @@ COMMANDS_HELP_TEXT = """📋 **Команды автореги**
 `старт все` — регистрировать игры из обычного и приоритетного каналов: сначала старые карточки, потом новые
 `старт обычный` — только обычный канал
 `старт приоритет` — только приоритетный канал
+`старт автоварны` — включить автоматическую выдачу варнов
 `енд` — остановить авторег
+`енд автоварны` — выключить автоматическую выдачу варнов
 После перезапуска бота на Railway снова напишите `старт все`.
 
 **Только владелец (`MY_ACCOUNT_ID` или текущая сессия)**
@@ -8617,6 +8619,24 @@ async def on_message(message: discord.Message) -> None:
     if stats_command:
         mode = "hours" if stats_command.group(1) in ("часы", "hours") else "days"
         await send_registration_stats(message.channel, mode)
+        return
+
+    if command in {"старт автоварны", "старт варны", "варны вкл", "автоварны вкл"}:
+        if not has_start_end_access(author_id, message):
+            await message.channel.send(START_END_ACCESS_DENIED_TEXT)
+            return
+        changed = set_auto_warns_enabled(True)
+        suffix = "" if changed else " (уже были включены)"
+        await message.channel.send(f"✅ Автоварны включены{suffix}.")
+        return
+
+    if command in {"енд автоварны", "стоп автоварны", "варны выкл", "автоварны выкл"}:
+        if not has_start_end_access(author_id, message):
+            await message.channel.send(START_END_ACCESS_DENIED_TEXT)
+            return
+        changed = set_auto_warns_enabled(False)
+        suffix = "" if changed else " (уже были выключены)"
+        await message.channel.send(f"✅ Автоварны выключены{suffix}.")
         return
 
     if command == "енд" or command.startswith("старт"):
