@@ -6391,8 +6391,11 @@ async def send_zero_stat_warnings(
                     int(result["match_id"]),
                     notification_channel=notification_channel,
                 )
-                
-                # Wait for mod bot to say 'Готово' before counting as success
+                # Варн отправлен — сразу считаем успешным и ставим галочку
+                sent_warnings += 1
+                log.info("Матч #%s: варн игроку <@%s> отправлен в admin-commands", result['match_id'], user_id)
+
+                # Wait for mod bot to say 'Варн выдан' — только для логирования
                 confirmed = await wait_for_warn_confirmation(
                     admin_command_channel,
                     user_id,
@@ -6400,16 +6403,17 @@ async def send_zero_stat_warnings(
                     target_names=player_identity_names(player),
                     match_id=int(result.get("match_id") or 0),
                 )
-                
+
                 if confirmed:
-                    sent_warnings += 1
                     log.info("Матч #%s: варн игроку <@%s> подтверждён ботом сервера", result['match_id'], user_id)
                 else:
-                    log.warning("Матч #%s: варн игроку <@%s> отправлен, но 'Готово' не получено", result['match_id'], user_id)
+                    log.warning("Матч #%s: варн игроку <@%s> отправлен, но 'Готово' не получено за 20с", result['match_id'], user_id)
 
                 # Tag supervisor ONLY when player already has 2/3 warns
+                # Тег идёт в warning_channel (основной сервер), fallback — notification_channel
                 if needs_supervisor and supervisor_tag:
-                    await notification_channel.send(
+                    _sup_channel = warning_channel if warning_channel is not None else notification_channel
+                    await _sup_channel.send(
                         (
                             f"⚠️ {supervisor_tag} последний варн перед баном!\n"
                             f"Матч #{result['match_id']}\n"
@@ -6507,8 +6511,10 @@ async def send_zero_stat_warnings(
                 uncertain_lines.append(f"• {player_label} — {warn_reason} ({reason})")
             uncertain_text = f"{uncertain_supervisor_tag}\n" + "\n".join(uncertain_lines)
             
+            # Неуверенные варны → warning_channel (основной сервер), fallback → notification_channel
+            _uncertain_channel = warning_channel if warning_channel is not None else notification_channel
             try:
-                await notification_channel.send(uncertain_text[:2000])
+                await _uncertain_channel.send(uncertain_text[:2000])
                 log.info(
                     "Матч #%s: неуверенные варны переданы supervisor в канал варнов",
                     result.get("match_id"),
