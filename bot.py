@@ -6283,6 +6283,7 @@ async def send_zero_stat_warnings(
             ),
         )
         sent_warnings = 0
+        queued_warnings = 0
         uncertain_players: list[tuple[str, dict, Optional[int]]] = []
 
         for team_key, player_index, player in warning_players:
@@ -6370,100 +6371,51 @@ async def send_zero_stat_warnings(
             ).rstrip(". ")
             evidence_text = f"{target}\n{reason_text} - #{result['match_id']}"
 
-            # Division warns ping a separate moderator.
-            supervisor_tag = await resolve_warning_supervisor_tag(
-                source_message,
-                warning_context_channel,
-                admin_command_channel,
-                query_override=(WARN_DIVISION_SUPERVISOR_QUERY if league_type == "Division League" else None),
-                user_id_override=(WARN_DIVISION_SUPERVISOR_ID if league_type == "Division League" else None),
-            ) or default_supervisor_tag
-
-            # ── Check if this player has the 2/3 role → needs supervisor attention ──
-            needs_supervisor = member_has_23_warn_role(member)
-
-            try:
-                await post_warn_command(
-                    admin_command_channel,
-                    member, # Passing member object instead of ID
-                    league_type,
-                    reason_text,
-                    int(result["match_id"]),
-                    notification_channel=notification_channel,
-                )
-                # Варн отправлен — сразу считаем успешным и ставим галочку
-                sent_warnings += 1
-                log.info("Матч #%s: варн игроку <@%s> отправлен в admin-commands", result['match_id'], user_id)
-
-                # Wait for mod bot to say 'Варн выдан' — только для логирования
-                confirmed = await wait_for_warn_confirmation(
-                    admin_command_channel,
-                    user_id,
-                    registration_player_id=int(player.get("id") or 0),
-                    target_names=player_identity_names(player),
-                    match_id=int(result.get("match_id") or 0),
-                )
-
-                if confirmed:
-                    log.info("Матч #%s: варн игроку <@%s> подтверждён ботом сервера", result['match_id'], user_id)
-                else:
-                    log.warning("Матч #%s: варн игроку <@%s> отправлен, но 'Готово' не получено за 20с", result['match_id'], user_id)
-
-                # Tag supervisor ONLY when player already has 2/3 warns
-                # Тег идёт в warning_channel (основной сервер), fallback — notification_channel
-                if needs_supervisor and supervisor_tag:
-                    _sup_channel = warning_channel if warning_channel is not None else notification_channel
-                    await _sup_channel.send(
-                        (
-                            f"⚠️ {supervisor_tag} последний варн перед баном!\n"
-                            f"Матч #{result['match_id']}\n"
-                            f"Игрок: {target} (роль 2/3)\n"
-                            f"Причина: {reason_text}\n"
-                            f"Статус подтверждения: {'✅ Подтверждено' if confirmed else '❌ Не подтверждено'}"
-                        )[:2000]
-                    )
-            except Exception:
-                log.exception(
-                    "Не удалось отправить /warn матча #%s игроку #%s в канал %s",
+            if warning_channel is None:
+                log.warning(
+                    "Матч #%s: WARN_CHANNEL_ID не найден, отложенный варн невозможен для игрока #%s",
                     result.get("match_id"),
                     user_id,
-                    getattr(admin_command_channel, "id", "?"),
                 )
                 continue
 
-            # Evidence (screenshot + player mention) → WARN_CHANNEL_ID (ELITE FPL #варны)
-            if warning_channel is not None:
-                try:
-                    await send_warning_with_screenshot(
-                        warning_channel,
-                        evidence_text,
-                        int(result["match_id"]),
-                        source_images,
-                        source_urls,
-                    )
-                except Exception:
-                    log.exception(
-                        "Не удалось отправить доказательство автоварна матча #%s игроку #%s",
-                        result.get("match_id"),
-                        user_id,
-                    )
-            
-            # ── Log issued warn to LOG_CHANNEL (Railway server log channel) ──
+            queue_caption = evidence_text
+            if member_has_23_warn_role(member):
+                queue_caption += "\n⚠️ Последний варн перед баном (роль 2/3)"
+
+            try:
+                await send_warning_with_screenshot(
+                    warning_channel,
+                    queue_caption,
+                    int(result["match_id"]),
+                    source_images,
+                    source_urls,
+                )
+                queued_warnings += 1
+                log.info(
+                    "Матч #%s: варн игроку <@%s> поставлен в очередь на %s секунд",
+                    result.get("match_id"),
+                    user_id,
+                    WARN_ISSUE_DELAY_SECONDS,
+                )
+            except Exception:
+                log.exception(
+                    "Не удалось поставить в очередь варн матча #%s игроку #%s в канал %s",
+                    result.get("match_id"),
+                    user_id,
+                    getattr(warning_channel, "id", "?"),
+                )
+                continue
+
             log_text = (
-                f"✅ **Автоварн выдан** — матч #{result['match_id']}\n"
+                f"🕒 **Автоварн поставлен в очередь** — матч #{result['match_id']}\n"
                 f"Игрок: {target} (#{player.get('id')})\n"
                 f"Причина: {reason_text}\n"
-                f"Лига: {league_type}"
+                f"Лига: {league_type}\n"
+                f"Задержка перед /warn: {WARN_ISSUE_DELAY_SECONDS} сек."
             )
-            if needs_supervisor:
-                log_text += "\n⚠️ Роль 2/3 — последний варн перед баном!"
-            log.info(
-                "Матч #%s: автоварн выдан — <@%s> %s %s",
-                result.get("match_id"),
-                user_id,
-                reason_text,
-                league_type,
-            )
+            if member_has_23_warn_role(member):
+                log_text += "\n⚠️ Роль 2/3 — при фактической выдаче будет тегнут supervisor"
             if warning_log_channel is not None:
                 try:
                     await send_warning_with_screenshot(
@@ -6475,7 +6427,7 @@ async def send_zero_stat_warnings(
                     )
                 except Exception:
                     log.exception(
-                        "Не удалось записать автоварн матча #%s в лог-канал %s",
+                        "Не удалось записать отложенный автоварн матча #%s в лог-канал %s",
                         result.get("match_id"),
                         LOG_CHANNEL_ID,
                     )
@@ -6523,12 +6475,21 @@ async def send_zero_stat_warnings(
                 log.exception("Не удалось отправить uncertain-варны в канал варнов")
                 await notify_log_channel(uncertain_text[:2000])
         log.info(
-            "Матч #%s: отправлено строгих автоварнов %s из %s",
+            "Матч #%s: выдано автоварнов %s, поставлено в очередь %s, кандидатов %s",
             result.get("match_id"),
             sent_warnings,
+            queued_warnings,
             len(warning_players),
         )
-        if sent_warnings > 0:
+        if queued_warnings > 0:
+            try:
+                await source_message.add_reaction("🕒")
+            except Exception:
+                log.warning(
+                    "Не удалось поставить реакцию ожидания на карточку матча #%s",
+                    result.get("match_id"),
+                )
+        elif sent_warnings > 0:
             try:
                 await source_message.add_reaction("✅")
             except Exception:
@@ -8061,10 +8022,13 @@ async def on_raw_reaction_add(payload) -> None:
 
 
 RETRY_WARNS_LIMIT = int(os.getenv("RETRY_WARNS_LIMIT", "30"))
+WARN_ISSUE_DELAY_SECONDS = max(0, int(os.getenv("WARN_ISSUE_DELAY_SECONDS", "3600")))
+WARN_RETRY_POLL_SECONDS = max(15, int(os.getenv("WARN_RETRY_POLL_SECONDS", "60")))
+pending_warns_retry_task: Optional[asyncio.Task] = None
 
 
 async def retry_pending_warns() -> int:
-    """Read last N messages from WARN_CHANNEL_ID, find those without ✅, and issue /warn."""
+    """Read last N messages from WARN_CHANNEL_ID, wait the delay, then issue /warn."""
     if not WARN_CHANNEL_ID or not WARN_COMMAND_CHANNEL_ID:
         log.info("retry_pending_warns: WARN_CHANNEL_ID или WARN_COMMAND_CHANNEL_ID не заданы")
         return 0
@@ -8092,6 +8056,15 @@ async def retry_pending_warns() -> int:
             continue
         # Skip messages not from us
         if not client.user or getattr(getattr(msg, "author", None), "id", None) != client.user.id:
+            continue
+
+        created_at = getattr(msg, "created_at", None)
+        if created_at is None:
+            continue
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+        if age_seconds < WARN_ISSUE_DELAY_SECONDS:
             continue
 
         text = str(getattr(msg, "content", "") or "")
@@ -8149,13 +8122,14 @@ async def retry_pending_warns() -> int:
             )
             
             # Wait for confirmation
-            if await wait_for_warn_confirmation(
+            confirmed = await wait_for_warn_confirmation(
                 admin_channel,
                 user_id,
                 registration_player_id=short_registration_id,
                 target_names=[getattr(member, "display_name", ""), getattr(member, "name", "")],
                 match_id=match_id,
-            ):
+            )
+            if confirmed:
                 issued += 1
                 # Mark as handled
                 with contextlib.suppress(Exception):
@@ -8163,7 +8137,29 @@ async def retry_pending_warns() -> int:
                 log.info("retry_pending_warns: варн матча #%s подтверждён, галочка поставлена", match_id)
             else:
                 log.warning("retry_pending_warns: варн матча #%s отправлен, но не подтверждён ботом", match_id)
-                
+
+            if member_has_23_warn_role(member):
+                supervisor_tag = await resolve_warning_supervisor_tag(
+                    msg,
+                    warn_channel,
+                    admin_channel,
+                    query_override=(WARN_DIVISION_SUPERVISOR_QUERY if league_type == "Division League" else None),
+                    user_id_override=(WARN_DIVISION_SUPERVISOR_ID if league_type == "Division League" else None),
+                )
+                if supervisor_tag:
+                    status_text = "✅ Подтверждено" if confirmed else "❌ Не подтверждено"
+                    _sup_channel = warn_channel if warn_channel is not None else (notification_ch or admin_channel)
+                    with contextlib.suppress(Exception):
+                        await _sup_channel.send(
+                            (
+                                f"⚠️ {supervisor_tag} последний варн перед баном!\n"
+                                f"Матч #{match_id}\n"
+                                f"Игрок: <@{user_id}> (роль 2/3)\n"
+                                f"Причина: {reason_text}\n"
+                                f"Статус подтверждения: {status_text}"
+                            )[:2000]
+                        )
+
         except Exception:
             log.exception("retry_pending_warns: ошибка /warn матча #%s", match_id)
 
@@ -8193,16 +8189,25 @@ async def on_ready() -> None:
     log.info("Фоновый опрос ТГ-команд запущен (каждые 3 с, файл: %s)", TG_COMMANDS_FILE)
     # Retry pending warns from WARN_CHANNEL that don't have ✅ yet
     if auto_warns_enabled() and WARN_CHANNEL_ID and WARN_COMMAND_CHANNEL_ID:
-        async def _retry_warns_background():
-            await asyncio.sleep(5)  # Wait for bot to fully connect
-            try:
-                count = await retry_pending_warns()
-                if count:
-                    log.info("При старте выдано %s /warn из необработанных варнов", count)
-            except Exception:
-                log.exception("Ошибка при retry_pending_warns при старте")
-        asyncio.get_event_loop().create_task(_retry_warns_background())
-        log.info("Фоновый retry_pending_warns запланирован (последние %s сообщений)", RETRY_WARNS_LIMIT)
+        global pending_warns_retry_task
+        if pending_warns_retry_task is None or pending_warns_retry_task.done():
+            async def _retry_warns_background():
+                await asyncio.sleep(5)  # Wait for bot to fully connect
+                while True:
+                    try:
+                        count = await retry_pending_warns()
+                        if count:
+                            log.info("Выдано %s /warn из очереди WARN_CHANNEL", count)
+                    except Exception:
+                        log.exception("Ошибка в фоне retry_pending_warns")
+                    await asyncio.sleep(WARN_RETRY_POLL_SECONDS)
+            pending_warns_retry_task = asyncio.get_event_loop().create_task(_retry_warns_background())
+        log.info(
+            "Фоновый retry_pending_warns запланирован (каждые %s с, последние %s сообщений, задержка %s с)",
+            WARN_RETRY_POLL_SECONDS,
+            RETRY_WARNS_LIMIT,
+            WARN_ISSUE_DELAY_SECONDS,
+        )
 
 
 @client.event
