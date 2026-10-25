@@ -6379,6 +6379,35 @@ async def send_zero_stat_warnings(
                 )
                 continue
 
+            # Игрок с ролью 2/3 — последний варн перед баном.
+            # Бот НЕ выдаёт /warn самостоятельно: это делает гейм-админ вручную.
+            # Бот только тегает supervisor и пропускает постановку в очередь.
+            if member_has_23_warn_role(member):
+                supervisor_tag = await resolve_warning_supervisor_tag(
+                    source_message,
+                    warning_context_channel,
+                    admin_command_channel,
+                    query_override=(WARN_DIVISION_SUPERVISOR_QUERY if league_type == "Division League" else None),
+                    user_id_override=(WARN_DIVISION_SUPERVISOR_ID if league_type == "Division League" else None),
+                ) or default_supervisor_tag
+                log.info(
+                    "Матч #%s: игрок <@%s> имеет роль 2/3 — варн пропущен, тегаем supervisor %s",
+                    result.get("match_id"), user_id, supervisor_tag,
+                )
+                if supervisor_tag:
+                    with contextlib.suppress(Exception):
+                        await notification_channel.send(
+                            (
+                                f"⚠️ {supervisor_tag} последний варн перед баном!\n"
+                                f"Матч #{result['match_id']}\n"
+                                f"Игрок: {target} (роль 2/3)\n"
+                                f"Причина: {reason_text}\n"
+                                f"Выдай /warn вручную — бот не выдаёт при роли 2/3."
+                            )[:2000]
+                        )
+                sent_warnings += 1  # считаем обработанным чтобы поставить ✅ на карточку
+                continue
+
             queue_caption = evidence_text
 
             try:
@@ -6412,28 +6441,6 @@ async def send_zero_stat_warnings(
                 f"Лига: {league_type}\n"
                 f"Задержка перед /warn: {WARN_ISSUE_DELAY_SECONDS} сек."
             )
-            needs_supervisor = member_has_23_warn_role(member)
-            if needs_supervisor:
-                log_text += "\n⚠️ Роль 2/3 — при фактической выдаче будет тегнут supervisor"
-                # Тег supervisor сразу в notification_channel (НЕ warn_channel)
-                supervisor_tag = await resolve_warning_supervisor_tag(
-                    source_message,
-                    warning_context_channel,
-                    admin_command_channel,
-                    query_override=(WARN_DIVISION_SUPERVISOR_QUERY if league_type == "Division League" else None),
-                    user_id_override=(WARN_DIVISION_SUPERVISOR_ID if league_type == "Division League" else None),
-                ) or default_supervisor_tag
-                if supervisor_tag:
-                    with contextlib.suppress(Exception):
-                        await notification_channel.send(
-                            (
-                                f"⚠️ {supervisor_tag} последний варн перед баном!\n"
-                                f"Матч #{result['match_id']}\n"
-                                f"Игрок: {target} (роль 2/3)\n"
-                                f"Причина: {reason_text}\n"
-                                f"Варн будет выдан автоматически через {WARN_ISSUE_DELAY_SECONDS // 60} мин."
-                            )[:2000]
-                        )
             if warning_log_channel is not None:
                 try:
                     await send_warning_with_screenshot(
@@ -8129,6 +8136,17 @@ async def retry_pending_warns() -> int:
             log.info("retry_pending_warns: матч #%s — не определена лига для %s", match_id, user_id)
             continue
 
+        # Игрок с ролью 2/3 — бот НЕ выдаёт /warn, это делает гейм-админ вручную.
+        # Просто ставим ✅ на сообщение (уже было тегнуто при постановке в очередь).
+        if member_has_23_warn_role(member):
+            log.info(
+                "retry_pending_warns: матч #%s — игрок <@%s> роль 2/3, /warn пропущен (гейм-админ выдаёт вручную)",
+                match_id, user_id,
+            )
+            with contextlib.suppress(Exception):
+                await msg.add_reaction("✅")
+            continue
+
         # Issue /warn
         try:
             await post_warn_command(
@@ -8139,7 +8157,7 @@ async def retry_pending_warns() -> int:
                 match_id,
                 notification_channel=notification_ch,
             )
-            
+
             # Варн отправлен — сразу ставим галочку чтобы не выдавать повторно
             issued += 1
             with contextlib.suppress(Exception):
@@ -8158,30 +8176,6 @@ async def retry_pending_warns() -> int:
                 log.info("retry_pending_warns: варн матча #%s подтверждён ботом сервера", match_id)
             else:
                 log.warning("retry_pending_warns: варн матча #%s отправлен, но 'Варн выдан' не получено за 20с", match_id)
-
-            if member_has_23_warn_role(member):
-                supervisor_tag = await resolve_warning_supervisor_tag(
-                    msg,
-                    warn_channel,
-                    admin_channel,
-                    query_override=(WARN_DIVISION_SUPERVISOR_QUERY if league_type == "Division League" else None),
-                    user_id_override=(WARN_DIVISION_SUPERVISOR_ID if league_type == "Division League" else None),
-                )
-                if supervisor_tag:
-                    status_text = "✅ Подтверждено" if confirmed else "❌ Не подтверждено"
-                    # Отправляем тег supervisor в notification/admin канал, НЕ в warn_channel
-                    # чтобы не создавать новые сообщения которые retry парсит как варны
-                    _sup_channel = notification_ch or admin_channel
-                    with contextlib.suppress(Exception):
-                        await _sup_channel.send(
-                            (
-                                f"⚠️ {supervisor_tag} последний варн перед баном!\n"
-                                f"Матч #{match_id}\n"
-                                f"Игрок: <@{user_id}> (роль 2/3)\n"
-                                f"Причина: {reason_text}\n"
-                                f"Статус подтверждения: {status_text}"
-                            )[:2000]
-                        )
 
         except Exception:
             log.exception("retry_pending_warns: ошибка /warn матча #%s", match_id)
