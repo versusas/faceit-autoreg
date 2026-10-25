@@ -5820,10 +5820,6 @@ async def wait_for_warn_confirmation(
     timeout: float = 20.0,
 ) -> bool:
     """A warn is successful only after the final `Варн выдан` card appears in punishments."""
-    exec_client = warn_dispatch_client()
-    punishments_channel = await resolve_warn_punishments_channel(channel)
-    if punishments_channel is None:
-        return False
     target_names = [name for name in (target_names or []) if name]
 
     def matches_confirmation_text(raw: str) -> bool:
@@ -5840,21 +5836,23 @@ async def wait_for_warn_confirmation(
         lowered_names = [str(name).lower() for name in target_names]
         return any(name and name in lowered for name in lowered_names)
 
-    def check(m):
-        if int(getattr(getattr(m, "channel", None), "id", 0) or 0) != int(getattr(punishments_channel, "id", 0) or 0):
-            return False
-        return matches_confirmation_text(registration_response_text(m))
+    channels_to_check: list[object] = []
+    for exec_client in dict.fromkeys([warn_dispatch_client(), client]):
+        resolved = await resolve_warn_punishments_channel_for_client(exec_client, channel)
+        if resolved is not None and all(getattr(existing, "id", None) != getattr(resolved, "id", None) for existing in channels_to_check):
+            channels_to_check.append(resolved)
 
-    try:
-        await exec_client.wait_for("message", check=check, timeout=timeout)
-        return True
-    except asyncio.TimeoutError:
-        pass
+    if not channels_to_check:
+        return False
 
-    with contextlib.suppress(Exception):
-        async for candidate in punishments_channel.history(limit=12):
-            if matches_confirmation_text(registration_response_text(candidate)):
-                return True
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        for punishments_channel in channels_to_check:
+            with contextlib.suppress(Exception):
+                async for candidate in punishments_channel.history(limit=12):
+                    if matches_confirmation_text(registration_response_text(candidate)):
+                        return True
+        await asyncio.sleep(1.2)
     return False
 
 
@@ -5993,9 +5991,8 @@ async def resolve_autoreg_warns_channel():
     return None
 
 
-async def resolve_warn_punishments_channel(admin_channel):
+async def resolve_warn_punishments_channel_for_client(exec_client: discord.Client, admin_channel):
     """Channel where the league bot posts the final punishment card (`Варн выдан`)."""
-    exec_client = warn_dispatch_client()
     if WARN_PUNISHMENTS_CHANNEL_ID:
         channel = exec_client.get_channel(WARN_PUNISHMENTS_CHANNEL_ID)
         if channel is None:
@@ -6004,7 +6001,13 @@ async def resolve_warn_punishments_channel(admin_channel):
         if channel is not None:
             return channel
 
-    guild = getattr(await warn_dispatch_channel(admin_channel), "guild", None)
+    admin_channel_id = int(getattr(admin_channel, "id", 0) or 0)
+    resolved_admin = admin_channel
+    if exec_client is not client and admin_channel_id:
+        with contextlib.suppress(Exception):
+            resolved_admin = exec_client.get_channel(admin_channel_id) or await exec_client.fetch_channel(admin_channel_id)
+
+    guild = getattr(resolved_admin, "guild", None)
     if guild is None:
         return None
     exact = {"наказания", "punishments", "punishment", "sanctions"}
@@ -6016,6 +6019,10 @@ async def resolve_warn_punishments_channel(admin_channel):
         if fallback is None and ("наказ" in name or "punish" in name or "sanction" in name):
             fallback = channel
     return fallback
+
+
+async def resolve_warn_punishments_channel(admin_channel):
+    return await resolve_warn_punishments_channel_for_client(warn_dispatch_client(), admin_channel)
 
 
 async def send_warning_with_screenshot(
