@@ -6380,8 +6380,6 @@ async def send_zero_stat_warnings(
                 continue
 
             queue_caption = evidence_text
-            if member_has_23_warn_role(member):
-                queue_caption += "\n⚠️ Последний варн перед баном (роль 2/3)"
 
             try:
                 await send_warning_with_screenshot(
@@ -6414,8 +6412,28 @@ async def send_zero_stat_warnings(
                 f"Лига: {league_type}\n"
                 f"Задержка перед /warn: {WARN_ISSUE_DELAY_SECONDS} сек."
             )
-            if member_has_23_warn_role(member):
+            needs_supervisor = member_has_23_warn_role(member)
+            if needs_supervisor:
                 log_text += "\n⚠️ Роль 2/3 — при фактической выдаче будет тегнут supervisor"
+                # Тег supervisor сразу в notification_channel (НЕ warn_channel)
+                supervisor_tag = await resolve_warning_supervisor_tag(
+                    source_message,
+                    warning_context_channel,
+                    admin_command_channel,
+                    query_override=(WARN_DIVISION_SUPERVISOR_QUERY if league_type == "Division League" else None),
+                    user_id_override=(WARN_DIVISION_SUPERVISOR_ID if league_type == "Division League" else None),
+                ) or default_supervisor_tag
+                if supervisor_tag:
+                    with contextlib.suppress(Exception):
+                        await notification_channel.send(
+                            (
+                                f"⚠️ {supervisor_tag} последний варн перед баном!\n"
+                                f"Матч #{result['match_id']}\n"
+                                f"Игрок: {target} (роль 2/3)\n"
+                                f"Причина: {reason_text}\n"
+                                f"Варн будет выдан автоматически через {WARN_ISSUE_DELAY_SECONDS // 60} мин."
+                            )[:2000]
+                        )
             if warning_log_channel is not None:
                 try:
                     await send_warning_with_screenshot(
@@ -6463,8 +6481,9 @@ async def send_zero_stat_warnings(
                 uncertain_lines.append(f"• {player_label} — {warn_reason} ({reason})")
             uncertain_text = f"{uncertain_supervisor_tag}\n" + "\n".join(uncertain_lines)
             
-            # Неуверенные варны → warning_channel (основной сервер), fallback → notification_channel
-            _uncertain_channel = warning_channel if warning_channel is not None else notification_channel
+            # Неуверенные варны → notification_channel (НЕ warning_channel,
+            # чтобы retry_pending_warns не пытался парсить их как очередь варнов)
+            _uncertain_channel = notification_channel
             try:
                 await _uncertain_channel.send(uncertain_text[:2000])
                 log.info(
@@ -8121,7 +8140,13 @@ async def retry_pending_warns() -> int:
                 notification_channel=notification_ch,
             )
             
-            # Wait for confirmation
+            # Варн отправлен — сразу ставим галочку чтобы не выдавать повторно
+            issued += 1
+            with contextlib.suppress(Exception):
+                await msg.add_reaction("✅")
+            log.info("retry_pending_warns: варн матча #%s отправлен, галочка поставлена", match_id)
+
+            # Wait for confirmation — только для логирования
             confirmed = await wait_for_warn_confirmation(
                 admin_channel,
                 user_id,
@@ -8130,13 +8155,9 @@ async def retry_pending_warns() -> int:
                 match_id=match_id,
             )
             if confirmed:
-                issued += 1
-                # Mark as handled
-                with contextlib.suppress(Exception):
-                    await msg.add_reaction("✅")
-                log.info("retry_pending_warns: варн матча #%s подтверждён, галочка поставлена", match_id)
+                log.info("retry_pending_warns: варн матча #%s подтверждён ботом сервера", match_id)
             else:
-                log.warning("retry_pending_warns: варн матча #%s отправлен, но не подтверждён ботом", match_id)
+                log.warning("retry_pending_warns: варн матча #%s отправлен, но 'Варн выдан' не получено за 20с", match_id)
 
             if member_has_23_warn_role(member):
                 supervisor_tag = await resolve_warning_supervisor_tag(
@@ -8148,7 +8169,9 @@ async def retry_pending_warns() -> int:
                 )
                 if supervisor_tag:
                     status_text = "✅ Подтверждено" if confirmed else "❌ Не подтверждено"
-                    _sup_channel = warn_channel if warn_channel is not None else (notification_ch or admin_channel)
+                    # Отправляем тег supervisor в notification/admin канал, НЕ в warn_channel
+                    # чтобы не создавать новые сообщения которые retry парсит как варны
+                    _sup_channel = notification_ch or admin_channel
                     with contextlib.suppress(Exception):
                         await _sup_channel.send(
                             (
