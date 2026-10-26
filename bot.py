@@ -6076,14 +6076,14 @@ async def send_manual_last_warn_notice(
     player_tag: str,
     reason_text: str,
 ) -> None:
-    """Notify the main warn channel that a 2/3 player must be handled manually."""
+    """Notify the main warn channel that a 2/3 player has the last warn before ban."""
     sent = await channel.send(
         (
             f"⚠️ {supervisor_tag} последний варн перед баном!\n"
             f"Матч #{match_id}\n"
             f"Игрок: {player_tag} (роль 2/3)\n"
             f"Причина: {reason_text}\n"
-            f"Выдай /warn вручную — бот не выдаёт при роли 2/3."
+            f"/warn будет выдан автоматически — это уведомление."
         )[:2000]
     )
     with contextlib.suppress(Exception):
@@ -6401,8 +6401,8 @@ async def send_zero_stat_warnings(
                 continue
 
             # Игрок с ролью 2/3 — последний варн перед баном.
-            # Бот НЕ выдаёт /warn самостоятельно: это делает гейм-админ вручную.
-            # Пингуем только основного supervisor (versus2739) и только в warn-channel основного сервера.
+            # Варн всё равно выдаётся через час как обычно, но дополнительно
+            # тегаем основного supervisor (versus2739) в канале варнов основного сервера.
             if member_has_23_warn_role(member):
                 supervisor_tag = await resolve_warning_supervisor_tag(
                     source_message,
@@ -6411,11 +6411,10 @@ async def send_zero_stat_warnings(
                 ) or default_supervisor_tag
                 manual_channel = warning_channel or notification_channel or admin_command_channel
                 log.info(
-                    "Матч #%s: игрок <@%s> имеет роль 2/3 — варн пропущен, тегаем supervisor %s в канал %s",
+                    "Матч #%s: игрок <@%s> имеет роль 2/3 — тегаем supervisor %s, варн ставится в очередь",
                     result.get("match_id"),
                     user_id,
                     supervisor_tag,
-                    getattr(manual_channel, "id", "?"),
                 )
                 if supervisor_tag and manual_channel is not None:
                     with contextlib.suppress(Exception):
@@ -6426,8 +6425,6 @@ async def send_zero_stat_warnings(
                             target,
                             reason_text,
                         )
-                sent_warnings += 1  # считаем обработанным чтобы поставить ✅ на карточку
-                continue
 
             queue_caption = evidence_text
 
@@ -8117,7 +8114,8 @@ async def retry_pending_warns() -> int:
             continue
 
         text = str(getattr(msg, "content", "") or "")
-        if "Выдай /warn вручную — бот не выдаёт при роли 2/3." in text:
+        # Пропускаем уведомления про 2/3 (они уже с ✅ реакцией, но на всякий случай)
+        if "последний варн перед баном" in text:
             with contextlib.suppress(Exception):
                 await msg.add_reaction("✅")
             continue
@@ -8163,8 +8161,8 @@ async def retry_pending_warns() -> int:
             log.info("retry_pending_warns: матч #%s — не определена лига для %s", match_id, user_id)
             continue
 
-        # Игрок с ролью 2/3 — бот НЕ выдаёт /warn, это делает гейм-админ вручную.
-        # Для старых сообщений очереди дублируем ручной пинг в основном warn-channel и закрываем сообщение.
+        # Игрок с ролью 2/3 — последний варн перед баном.
+        # Варн всё равно выдаётся, но дополнительно тегаем supervisor.
         if member_has_23_warn_role(member):
             supervisor_tag = await resolve_warning_supervisor_tag(
                 msg,
@@ -8172,7 +8170,7 @@ async def retry_pending_warns() -> int:
                 admin_channel,
             )
             log.info(
-                "retry_pending_warns: матч #%s — игрок <@%s> роль 2/3, /warn пропущен; supervisor=%s",
+                "retry_pending_warns: матч #%s — игрок <@%s> роль 2/3, тегаем supervisor %s и выдаём /warn",
                 match_id, user_id, supervisor_tag,
             )
             if supervisor_tag and warn_channel is not None:
@@ -8184,9 +8182,6 @@ async def retry_pending_warns() -> int:
                         f"<@{user_id}>",
                         reason_text,
                     )
-            with contextlib.suppress(Exception):
-                await msg.add_reaction("✅")
-            continue
 
         # Issue /warn
         try:
