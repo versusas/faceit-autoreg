@@ -6069,6 +6069,27 @@ async def send_warning_with_screenshot(
     await channel.send(fallback[:2000])
 
 
+async def send_manual_last_warn_notice(
+    channel,
+    supervisor_tag: str,
+    match_id: int,
+    player_tag: str,
+    reason_text: str,
+) -> None:
+    """Notify the main warn channel that a 2/3 player must be handled manually."""
+    sent = await channel.send(
+        (
+            f"⚠️ {supervisor_tag} последний варн перед баном!\n"
+            f"Матч #{match_id}\n"
+            f"Игрок: {player_tag} (роль 2/3)\n"
+            f"Причина: {reason_text}\n"
+            f"Выдай /warn вручную — бот не выдаёт при роли 2/3."
+        )[:2000]
+    )
+    with contextlib.suppress(Exception):
+        await sent.add_reaction("✅")
+
+
 _background_tasks: set[asyncio.Task] = set()
 
 
@@ -6381,29 +6402,29 @@ async def send_zero_stat_warnings(
 
             # Игрок с ролью 2/3 — последний варн перед баном.
             # Бот НЕ выдаёт /warn самостоятельно: это делает гейм-админ вручную.
-            # Бот только тегает supervisor и пропускает постановку в очередь.
+            # Пингуем только основного supervisor (versus2739) и только в warn-channel основного сервера.
             if member_has_23_warn_role(member):
                 supervisor_tag = await resolve_warning_supervisor_tag(
                     source_message,
-                    warning_context_channel,
+                    warning_channel,
                     admin_command_channel,
-                    query_override=(WARN_DIVISION_SUPERVISOR_QUERY if league_type == "Division League" else None),
-                    user_id_override=(WARN_DIVISION_SUPERVISOR_ID if league_type == "Division League" else None),
                 ) or default_supervisor_tag
+                manual_channel = warning_channel or notification_channel or admin_command_channel
                 log.info(
-                    "Матч #%s: игрок <@%s> имеет роль 2/3 — варн пропущен, тегаем supervisor %s",
-                    result.get("match_id"), user_id, supervisor_tag,
+                    "Матч #%s: игрок <@%s> имеет роль 2/3 — варн пропущен, тегаем supervisor %s в канал %s",
+                    result.get("match_id"),
+                    user_id,
+                    supervisor_tag,
+                    getattr(manual_channel, "id", "?"),
                 )
-                if supervisor_tag:
+                if supervisor_tag and manual_channel is not None:
                     with contextlib.suppress(Exception):
-                        await notification_channel.send(
-                            (
-                                f"⚠️ {supervisor_tag} последний варн перед баном!\n"
-                                f"Матч #{result['match_id']}\n"
-                                f"Игрок: {target} (роль 2/3)\n"
-                                f"Причина: {reason_text}\n"
-                                f"Выдай /warn вручную — бот не выдаёт при роли 2/3."
-                            )[:2000]
+                        await send_manual_last_warn_notice(
+                            manual_channel,
+                            supervisor_tag,
+                            int(result["match_id"]),
+                            target,
+                            reason_text,
                         )
                 sent_warnings += 1  # считаем обработанным чтобы поставить ✅ на карточку
                 continue
@@ -8096,6 +8117,10 @@ async def retry_pending_warns() -> int:
             continue
 
         text = str(getattr(msg, "content", "") or "")
+        if "Выдай /warn вручную — бот не выдаёт при роли 2/3." in text:
+            with contextlib.suppress(Exception):
+                await msg.add_reaction("✅")
+            continue
         # Parse: first line = @mention or @#ID | nick
         # Second line = reason - #match_id
         lines = text.strip().split("\n")
@@ -8139,12 +8164,26 @@ async def retry_pending_warns() -> int:
             continue
 
         # Игрок с ролью 2/3 — бот НЕ выдаёт /warn, это делает гейм-админ вручную.
-        # Просто ставим ✅ на сообщение (уже было тегнуто при постановке в очередь).
+        # Для старых сообщений очереди дублируем ручной пинг в основном warn-channel и закрываем сообщение.
         if member_has_23_warn_role(member):
-            log.info(
-                "retry_pending_warns: матч #%s — игрок <@%s> роль 2/3, /warn пропущен (гейм-админ выдаёт вручную)",
-                match_id, user_id,
+            supervisor_tag = await resolve_warning_supervisor_tag(
+                msg,
+                warn_channel,
+                admin_channel,
             )
+            log.info(
+                "retry_pending_warns: матч #%s — игрок <@%s> роль 2/3, /warn пропущен; supervisor=%s",
+                match_id, user_id, supervisor_tag,
+            )
+            if supervisor_tag and warn_channel is not None:
+                with contextlib.suppress(Exception):
+                    await send_manual_last_warn_notice(
+                        warn_channel,
+                        supervisor_tag,
+                        match_id,
+                        f"<@{user_id}>",
+                        reason_text,
+                    )
             with contextlib.suppress(Exception):
                 await msg.add_reaction("✅")
             continue
