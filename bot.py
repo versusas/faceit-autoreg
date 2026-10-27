@@ -3511,7 +3511,14 @@ def result_from_card_and_visual_audit(
                     visual_players[visual_index].get("nickname", ""),
                 ),
             )
-            wrong_nickname_card_indices.add(card_index)
+            # Присваиваем игроку его визуальную строку, чтобы сохранить реальные K/A/D
+            resolved_order[card_index] = visual_index
+            # Если на табло 5 или меньше игроков, оно полностью видно (нет скролла).
+            # Значит, мы уверены, что это именно его неправильный ник.
+            if len(visual_players) <= 5:
+                forced_wrong_nickname_indices.add(card_index)
+            else:
+                wrong_nickname_card_indices.add(card_index)
             available_cards.remove(card_index)
 
         merged: list[dict] = []
@@ -3527,11 +3534,7 @@ def result_from_card_and_visual_audit(
                         "kills": 0,
                         "assists": 0,
                         "deaths": 13,
-                        "warning_reason": (
-                            "неправильный ник"
-                            if card_index in wrong_nickname_card_indices
-                            else "нет на скриншоте"
-                        ),
+                        "warning_reason": "нет на скриншоте",  # неправильный ник теперь имеет visual_index
                     }
                 )
                 continue
@@ -3548,6 +3551,8 @@ def result_from_card_and_visual_audit(
             elif card_index in forced_wrong_nickname_indices:
                 warning_reason = "неправильный ник"
                 warning_certainty = "full_scoreboard_wrong_nickname"
+            elif card_index in wrong_nickname_card_indices:
+                warning_reason = "неправильный ник"
             merged_player = {
                 # The card itself is authoritative for registration IDs.
                 "id": int(card_player["id"]),
